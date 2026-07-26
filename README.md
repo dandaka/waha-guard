@@ -1,5 +1,7 @@
 # waha-guard
 
+[![ci](https://github.com/dandaka/waha-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/dandaka/waha-guard/actions/workflows/ci.yml)
+
 A reverse proxy that speaks [WAHA](https://waha.devlike.pro)'s own REST API and sits between
 your app and WAHA, applying the pacing, contact-graph and presence policy that WAHA does not
 ship.
@@ -10,9 +12,10 @@ app ◀───── webhook ─────── guard ◀── webhook ┘
 ```
 
 Adoption is two config lines: point your app's base URL at the guard, and point WAHA's
-webhook at the guard. It is engine-agnostic (`gows` / `noweb` / `webjs` — it only uses the
-REST API) and language-agnostic, which is the point: it works the same from n8n, Python,
-Make, or a shell script.
+webhook at the guard. Nothing else in your app changes — the guard answers with WAHA's own
+responses. It is engine-agnostic (`gows` / `noweb` / `webjs` — it only uses the REST API)
+and language-agnostic, which is the point: it works the same from n8n, Python, Make, or a
+shell script.
 
 ## What this is not
 
@@ -28,13 +31,48 @@ human has never spoken to — protects the *recipient* at least as much as it pr
 number. If you are looking for something that lets you safely message strangers at volume,
 this is not that, and no proxy is.
 
+## What it looks like in practice
+
+With the default `conservative` preset, sending to someone you have never spoken to:
+
+```bash
+curl -i -X POST localhost:3010/api/sendText \
+  -H 'content-type: application/json' \
+  -d '{"session":"default","chatId":"351900000000@c.us","text":"hi"}'
+```
+
+```http
+HTTP/1.1 403 Forbidden
+x-guard-reason: guard.no_human_touch
+
+{"error":"guard.no_human_touch","guard":true,
+ "message":"no human has ever messaged this contact from this number — send the first
+            message by hand, then automation may follow"}
+```
+
+Reply to them from your phone, or let them message you first. WAHA delivers the webhook,
+the guard records the human touch, and the same call now succeeds — after pacing itself and
+typing for as long as the message would actually take a person to type:
+
+```bash
+curl -s localhost:3010/_guard/contact?session=default&chatId=351900000000@c.us
+# {"state":"known","in_count":1,"human_touch_at":1785060305577,...}
+
+time curl -s -X POST localhost:3010/api/sendText -d '{...,"text":"thanks for reaching out"}'
+# {"id":{"_serialized":"true_351900000000@c.us_3EB0..."}}
+# real  0m14.4s     <- 12s of typing indicator, then the send
+```
+
+Everything the guard does not intercept — `GET /api/sessions`, `/api/contacts`, the
+dashboard, endpoints that did not exist when this was written — is proxied byte-for-byte.
+
 ## Quick start
 
 ```bash
 docker compose -f docker-compose.example.yml up
 ```
 
-Or run it directly:
+Or run it directly against an existing WAHA:
 
 ```bash
 GUARD_UPSTREAM=http://localhost:3000 GUARD_STATE=./state/guard.sqlite bun run src/index.ts
@@ -47,6 +85,10 @@ Then change two things in your own setup:
 
 Set `GUARD_WEBHOOK_TARGET` to your real webhook URL and the guard forwards everything on,
 verbatim — body, headers (including WAHA's HMAC signature) and response status.
+
+In the reference compose file WAHA publishes **no port**, so the guard is the only thing
+that can reach it. That is what stops an app from quietly bypassing the guard by talking to
+WAHA directly.
 
 ### Configuration
 
@@ -79,7 +121,7 @@ discover that `sendImage` is unguarded:
 Session-scoped variants (`/api/{session}/...`) are matched too. Anything else that looks like
 it creates a message but is not on the list is **refused** with `403 guard.unknown_send_route`
 rather than waved through — a new WAHA release must not silently open a bypass. Waive one
-consciously with `routes.waived`.
+consciously with `routes.waived`, and please open an issue so it can be guarded properly.
 
 `startTyping` / `stopTyping` are suppressed when the guard owns presence, so the guard's
 typing plan and your app's typing simulation cannot interleave. Set `presence: caller` to
@@ -99,6 +141,10 @@ request
  → record          durable state + message id for ack correlation
 ```
 
+Sends are serialized per session. Pacing that is not serialized is not pacing: two
+concurrent requests would each check "was the last send 20 seconds ago?", both see yes, and
+both fire.
+
 ### Backpressure
 
 Two modes, because it changes your app's contract:
@@ -108,10 +154,33 @@ Two modes, because it changes your app's contract:
   **`429` + `Retry-After`** and a machine-readable `X-Guard-Reason`.
 - **`queue`** returns **`202`** with a guard-side id, sends later, and emits `guard.sent` or
   `guard.dropped` to your webhook. Better for batch senders — and a different contract, so
-  it is opt-in.
+  it is opt-in. The queue is a table, not an array: a `202` is a promise to deliver, and a
+  promise that evaporates on restart is a silent drop.
 
 Policy refusals fail **closed** (`403`/`429`). Infrastructure failures fail **loud**: if WAHA
 is unreachable you get a `502`, never a silent drop and never an unguarded pass-through.
+
+### Reason codes
+
+Every guard-generated response carries `X-Guard-Reason` and a JSON body with the same code,
+so a client can branch on the reason without parsing prose.
+
+| Code | Status | Meaning |
+|---|---|---|
+| `guard.opted_out` | 403 | Recipient asked to stop. Terminal until cleared. |
+| `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
+| `guard.handshake_exhausted` | 403 | Unanswered-message limit for this contact reached. |
+| `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
+| `guard.unidentified_recipient` | 400 | No `chatId` in the request, so contact policy is blind. |
+| `guard.reply_ratio` | 429 | Sending far more than is coming back. |
+| `guard.quiet_hours` · `guard.quiet_day` | 429 | Outside the allowed hours for this recipient. |
+| `guard.rate_minute` · `_hour` · `_day` | 429 | Sliding window full. `Retry-After` is exact. |
+| `guard.spacing` | 429 | Too soon after the previous message. |
+| `guard.warmup_budget` · `guard.warmup_new_contacts` | 429 | Warmup ramp for this session is spent. |
+| `guard.new_contact_budget` | 429 | Daily new-conversation limit reached. |
+| `guard.degraded` | 429 | Upstream signalled a rate limit; only replies are going out. |
+| `guard.session_stopped` | 503 | Session is `FAILED` / logged out. Nothing will send. |
+| `guard.upstream_unreachable` | 502 | WAHA did not answer. Nothing was sent. |
 
 ## The contact graph
 
@@ -129,6 +198,10 @@ actually reflects how these accounts survive: **refuse to send to any contact a 
 never messaged**. Make first contact by hand; automation takes over from the reply. It is on
 by default in the `conservative` preset (`contacts.requireHumanTouch`).
 
+Opt-out keywords are matched against the whole normalized message, not as a substring, so
+"can you stop by tomorrow?" is not an opt-out. A human replying by hand from the phone
+clears an opt-out — a person who just typed a message knows something the guard does not.
+
 ## State
 
 SQLite, one file. Durability is not optional here — an in-memory guard resets every warmup
@@ -145,22 +218,26 @@ real quota.
 ## Policy
 
 YAML with three presets — `conservative` (default), `balanced`, `off` — and per-session
-overrides. See [`policy.example.yml`](policy.example.yml) and
-[`docs/policy.md`](docs/policy.md), which documents **which numbers are measured and which
-are guesses**. Most of them are guesses. Treat them that way.
+overrides:
 
 ```yaml
 preset: conservative
 quietHours:
   timezone: Europe/Lisbon
 sessions:
-  sales:
+  support:
     contacts:
-      requireHumanTouch: true
+      requireHumanTouch: false   # inbound support is a conversation, not outreach
+    quietHours:
+      enabled: false
 ```
 
 Run `mode: observe` to evaluate every gate and log what it *would* have done without
 blocking anything. That is the safe way to introduce the guard to live traffic.
+
+See [`policy.example.yml`](policy.example.yml) for every key with comments, and
+[`docs/policy.md`](docs/policy.md) for the reference — which documents **which numbers are
+measured and which are guesses**. Most of them are guesses. Treat them that way.
 
 ## Guard endpoints
 
@@ -190,9 +267,11 @@ All namespaced under `/_guard/` so they cannot shadow a WAHA route.
 | — | Multi-upstream per-IP buckets | not started |
 | — | Postgres state backend | not started |
 
-The gap that matters most: none of the rate numbers have been validated against a real
-account over a long period. They are conservative guesses. See
-[`docs/policy.md`](docs/policy.md).
+Two honest gaps. The contract tests run against a fake WAHA, not a live one. And none of the
+rate numbers have been validated against a real account over a long period — they are
+conservative guesses, documented as such in [`docs/policy.md`](docs/policy.md). If you have
+data, an issue replacing a guess with a measurement is the most valuable thing you could
+contribute.
 
 ## Operational risks
 
@@ -213,6 +292,16 @@ bun test
 bun run typecheck
 bun run lint
 ```
+
+Pacing is tested against an injectable clock rather than by sleeping, so the whole suite
+runs in under two seconds. `test/helpers.ts` has a fake WAHA that records what it was asked
+to do.
+
+## Docs
+
+- [`docs/policy.md`](docs/policy.md) — every policy key, and the provenance of every default
+- [`docs/plan.md`](docs/plan.md) — the design document this was built from
+- [`policy.example.yml`](policy.example.yml) — a fully commented policy file
 
 ## License
 
