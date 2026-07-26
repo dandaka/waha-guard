@@ -101,6 +101,7 @@ WAHA directly.
 | `GUARD_STATE` | `/var/lib/guard/guard.sqlite` | SQLite state file |
 | `GUARD_PORT` / `GUARD_HOST` | `3000` / `0.0.0.0` | Listen address |
 | `GUARD_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `GUARD_API_KEY` | — | When set, `/_guard/*` endpoints (except `/_guard/health`) require this value in the `x-api-key` header. Set it whenever the guard is reachable beyond localhost. |
 
 ## Transparent by default
 

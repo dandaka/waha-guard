@@ -550,12 +550,13 @@ export class Store {
       .run(state, error, guardId)
   }
 
-  retryQueued(guardId: string, notBefore: number, error: string | null): void {
+  /** `countAttempt` is false for policy deferrals — only real failures spend attempts. */
+  retryQueued(guardId: string, notBefore: number, error: string | null, countAttempt = true): void {
     this.db
       .query(
-        'UPDATE queued SET attempts = attempts + 1, not_before = ?, last_error = ? WHERE guard_id = ?',
+        'UPDATE queued SET attempts = attempts + ?, not_before = ?, last_error = ? WHERE guard_id = ?',
       )
-      .run(notBefore, error, guardId)
+      .run(countAttempt ? 1 : 0, notBefore, error, guardId)
   }
 
   getQueued(guardId: string): QueuedRow | null {

@@ -44,13 +44,22 @@ export class QueueWorker {
   private async run(): Promise<void> {
     const idle = this.options.idleMs ?? 1_000
     while (this.running) {
-      let worked = false
-      for (const session of this.options.store.queuedSessions()) {
-        if (!this.running) break
-        worked = (await this.drainOne(session)) || worked
-      }
+      // Sessions drain concurrently: in block-gate waits one session can legitimately
+      // sleep for minutes, and that must not stall every other session's queue. Within a
+      // session the sender's mutex still serializes, so pacing is unaffected.
+      const results = await Promise.all(
+        this.options.store.queuedSessions().map((session) =>
+          this.drainOne(session).catch((error) => {
+            this.options.log.error('queue worker failed on a job', {
+              session,
+              error: String(error),
+            })
+            return false
+          }),
+        ),
+      )
       if (!this.running) break
-      if (!worked) await this.options.clock.sleep(idle)
+      if (!results.some(Boolean)) await this.options.clock.sleep(idle)
     }
   }
 
@@ -120,12 +129,16 @@ export class QueueWorker {
       }
       case 'deferred':
       case 'unreachable': {
-        const attempts = row.attempts + 1
+        // A deferral is policy pacing, not a failure: it must not consume the attempts
+        // that decide abandonment, or a job that patiently waited out rate limits gets
+        // dropped on its first network blip.
+        const failed = result.status === 'unreachable'
+        const attempts = row.attempts + (failed ? 1 : 0)
         const reason =
           result.status === 'deferred'
             ? `${result.code}: ${result.reason}`
             : `upstream unreachable: ${String(result.error)}`
-        if (attempts >= maxAttempts && result.status === 'unreachable') {
+        if (failed && attempts >= maxAttempts) {
           store.settleQueued(row.guard_id, 'dropped', reason)
           await downstream.emit('guard.dropped', row.session, {
             guardId: row.guard_id,
@@ -143,7 +156,7 @@ export class QueueWorker {
           result.status === 'deferred'
             ? Math.min(result.retryAfterMs, 60_000)
             : Math.min(1_000 * 2 ** attempts, 60_000)
-        store.retryQueued(row.guard_id, clock.now() + delay, reason)
+        store.retryQueued(row.guard_id, clock.now() + delay, reason, failed)
         metrics.inc('queue_retries_total', { session: row.session })
         break
       }

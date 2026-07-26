@@ -97,6 +97,25 @@ describe('queue mode', () => {
     expect(harness.store.queuedDepth('default')).toBe(1)
   })
 
+  test('policy deferrals do not spend the attempts that decide abandonment', async () => {
+    harness = await startHarness({
+      policy: {
+        rates: { minSpacingMs: 600_000 },
+        backpressure: { mode: 'queue', maxWaitMs: 1_000 },
+      },
+    })
+    const first = await json(await send('a@c.us'))
+    const second = await json(await send('b@c.us'))
+    await drain()
+
+    // The second job was deferred by spacing: rescheduled, but no attempt consumed.
+    expect(harness.store.getQueued(first.guardId)!.state).toBe('sent')
+    const row = harness.store.getQueued(second.guardId)!
+    expect(row.state).toBe('pending')
+    expect(row.attempts).toBe(0)
+    expect(row.last_error).toContain('guard.spacing')
+  })
+
   test('a queued send outlives a restart', async () => {
     const path = `/tmp/waha-guard-queue-${Math.random().toString(36).slice(2)}.sqlite`
     files.push(path)

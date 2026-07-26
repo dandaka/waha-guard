@@ -116,6 +116,7 @@ export function testConfig(overrides: Partial<GuardConfig> = {}): GuardConfig {
     upstreamTimeoutMs: 5_000,
     webhookTimeoutMs: 5_000,
     logLevel: 'error',
+    apiKey: null,
     ...overrides,
   }
 }
@@ -144,6 +145,7 @@ export interface HarnessOptions {
   /** Deterministic jitter/WPM draws. */
   rng?: () => number
   echoConfirmMs?: number
+  config?: Partial<GuardConfig>
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -152,7 +154,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   const clock = new TestClock()
   const store = options.store ?? new Store(':memory:')
   const guard = new Guard({
-    config: testConfig({ upstream: waha.url, webhookTarget: sink?.url ?? null }),
+    config: testConfig({ upstream: waha.url, webhookTarget: sink?.url ?? null, ...options.config }),
     policy: testPolicy(options.policy, options.preset ?? 'off'),
     store,
     clock,

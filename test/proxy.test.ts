@@ -83,6 +83,15 @@ describe('unknown send routes', () => {
     expect(harness.waha.requests).toHaveLength(0)
   })
 
+  test('are let through in observe mode — a shadow run must not change real traffic', async () => {
+    harness = await startHarness({
+      policy: { mode: 'observe', routes: { unknownSends: 'block' } },
+    })
+    const res = await get('/api/sendSticker', { method: 'POST', body: '{"chatId":"a@c.us"}' })
+    expect(res.status).toBe(200)
+    expect(harness.waha.requests).toHaveLength(1)
+  })
+
   test('are let through when the policy waives them consciously', async () => {
     harness = await startHarness({
       policy: { routes: { unknownSends: 'block', waived: ['/api/sendSticker'] } },
@@ -90,5 +99,32 @@ describe('unknown send routes', () => {
     const res = await get('/api/sendSticker', { method: 'POST', body: '{"chatId":"a@c.us"}' })
     expect(res.status).toBe(200)
     expect(harness.waha.requests).toHaveLength(1)
+  })
+})
+
+describe('guard api auth', () => {
+  test('without GUARD_API_KEY everything stays open', async () => {
+    harness = await startHarness()
+    expect((await get('/_guard/status')).status).toBe(200)
+  })
+
+  test('with GUARD_API_KEY set, state endpoints require the key', async () => {
+    harness = await startHarness({ config: { apiKey: 's3cret' } })
+
+    const denied = await get('/_guard/status')
+    expect(denied.status).toBe(401)
+    expect(denied.headers.get('x-guard-reason')).toBe('guard.unauthorized')
+
+    const resume = await get('/_guard/resume', {
+      method: 'POST',
+      body: JSON.stringify({ session: 'default' }),
+    })
+    expect(resume.status).toBe(401)
+
+    const allowed = await get('/_guard/status', { headers: { 'x-api-key': 's3cret' } })
+    expect(allowed.status).toBe(200)
+
+    // Health stays open for container healthchecks.
+    expect((await get('/_guard/health')).status).toBe(200)
   })
 })

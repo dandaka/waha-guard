@@ -176,7 +176,8 @@ export class Guard {
 
     if (isUnknownSend(match)) {
       this.metrics.inc('unknown_send_total', { path: url.pathname })
-      if (policy.routes.unknownSends === 'block') {
+      // Observe mode is a shadow run: it must never change what real traffic does.
+      if (policy.routes.unknownSends === 'block' && policy.mode !== 'observe') {
         this.log.warn('refused an unrecognised message-creating route', { path: url.pathname })
         return this.guardError(
           403,
@@ -324,8 +325,15 @@ export class Guard {
   private async handleGuardApi(req: Request, url: URL): Promise<Response> {
     const path = url.pathname
 
+    // Health stays open for container healthchecks; everything else can read contact
+    // state or clear safety stops, so it honours GUARD_API_KEY when one is configured.
     if (path === '/_guard/health') {
       return Response.json({ status: 'ok', upstream: this.options.config.upstream })
+    }
+
+    const apiKey = this.options.config.apiKey
+    if (apiKey !== null && req.headers.get('x-api-key') !== apiKey) {
+      return this.guardError(401, 'guard.unauthorized', 'x-api-key header is missing or wrong')
     }
 
     if (path === '/_guard/metrics') {

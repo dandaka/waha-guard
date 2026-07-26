@@ -13,6 +13,8 @@ export interface GuardConfig {
   upstreamTimeoutMs: number
   webhookTimeoutMs: number
   logLevel: LogLevel
+  /** When set, /_guard endpoints (except /_guard/health) require this key in x-api-key. */
+  apiKey: string | null
 }
 
 export class ConfigError extends Error {}
@@ -51,6 +53,13 @@ export function readConfig(env: Record<string, string | undefined> = process.env
   const target = env.GUARD_WEBHOOK_TARGET ?? null
   if (target) requireHttpUrl('GUARD_WEBHOOK_TARGET', target)
 
+  const logLevel = env.GUARD_LOG_LEVEL ?? 'info'
+  if (!['debug', 'info', 'warn', 'error'].includes(logLevel)) {
+    throw new ConfigError(
+      `GUARD_LOG_LEVEL must be debug|info|warn|error, got ${JSON.stringify(logLevel)}`,
+    )
+  }
+
   return {
     port: num('GUARD_PORT', 3000, env),
     hostname: env.GUARD_HOST ?? '0.0.0.0',
@@ -61,7 +70,8 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     policyPath: env.GUARD_POLICY ?? null,
     upstreamTimeoutMs: num('GUARD_UPSTREAM_TIMEOUT_MS', 60_000, env),
     webhookTimeoutMs: num('GUARD_WEBHOOK_TIMEOUT_MS', 15_000, env),
-    logLevel: (env.GUARD_LOG_LEVEL as LogLevel) ?? 'info',
+    logLevel: logLevel as LogLevel,
+    apiKey: env.GUARD_API_KEY || null,
   }
 }
 

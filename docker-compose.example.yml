@@ -31,6 +31,8 @@ services:
       GUARD_POLICY: /etc/guard/policy.yml
       GUARD_STATE: /var/lib/guard/guard.sqlite
       GUARD_LOG_LEVEL: info
+      # Protects /_guard/* state endpoints (opt-out, resume, contact state).
+      # GUARD_API_KEY: change-me
     volumes:
       - guard_state:/var/lib/guard
       - ./policy.example.yml:/etc/guard/policy.yml:ro
