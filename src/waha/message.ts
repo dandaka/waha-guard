@@ -101,6 +101,18 @@ export function chatIdFromSendBody(body: unknown): string | null {
   return null
 }
 
+/**
+ * Group (`@g.us`) and channel (`@newsletter`) chats have no individual on the other end, so
+ * the contact gates — every one of which describes a relationship with a person — do not
+ * mean anything for them. `requireHumanTouch` on a group the business owns is a refusal to
+ * post to your own announcement channel; `handshakeMaxMessages` mutes it after one message
+ * nobody happened to reply to.
+ */
+export function isGroupChatId(chatId: string | null | undefined): boolean {
+  if (!chatId) return false
+  return chatId.endsWith('@g.us') || chatId.endsWith('@newsletter')
+}
+
 export function sessionFromSendBody(body: unknown): string | null {
   const b = asRecord(body)
   const v = b?.session

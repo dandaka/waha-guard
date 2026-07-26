@@ -4,7 +4,7 @@ import { forSession } from '../policy/load.ts'
 import type { Policy } from '../policy/schema.ts'
 import type { Store } from '../state/store.ts'
 import type { Clock } from '../util/clock.ts'
-import { ackLevel, observeMessage } from '../waha/message.ts'
+import { ackLevel, isGroupChatId, observeMessage } from '../waha/message.ts'
 
 export interface WahaEvent {
   event: string
@@ -136,6 +136,9 @@ export class Observer {
   private checkOptOut(session: string, chatId: string, body: string, now: number): void {
     const policy = forSession(this.deps.policy(), session)
     if (!policy.optOut.enabled || !body) return
+    // One member typing "stop" is not the group asking to be muted, and treating it that way
+    // would let any participant silence a channel for everyone. Groups opt out by hand.
+    if (isGroupChatId(chatId)) return
     const normalized = normalizeForOptOut(body)
     if (!policy.optOut.keywords.some((k) => normalized === normalizeForOptOut(k))) return
     this.deps.store.markOptOut(session, chatId, now)

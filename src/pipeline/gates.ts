@@ -1,6 +1,7 @@
 import type { ContactState, SessionPolicy } from '../policy/schema.ts'
 import type { ContactRow, SessionStateRow, Store } from '../state/store.ts'
 import { DAY, HOUR, MINUTE, quietUntil } from '../util/time.ts'
+import { isGroupChatId } from '../waha/message.ts'
 
 /**
  * Policy gates.
@@ -39,10 +40,26 @@ export interface GateInputs {
 
 const allow: GateResult = { kind: 'allow' }
 
+/** A group the contact gates have been told to skip. */
+function groupExempt({ policy, ctx }: GateInputs): boolean {
+  return policy.groups.mode === 'exempt' && isGroupChatId(ctx.chatId)
+}
+
+/**
+ * An exempt group has no individual relationship to grade, so the gates that branch on
+ * contact state read it as `known`. `opted_out` survives regardless: it is the one state a
+ * human set deliberately, and no exemption may override it.
+ */
+function effectiveContactState(inputs: GateInputs): ContactState {
+  const state = inputs.contact.state as ContactState
+  if (state === 'opted_out') return state
+  return groupExempt(inputs) ? 'known' : state
+}
+
 /** The effective spacing multiplier: contact state x whatever backoff is currently active. */
 export function spacingMultiplier(inputs: GateInputs): number {
-  const { policy, contact, session, ctx, store } = inputs
-  const state = contact.state as ContactState
+  const { policy, session, ctx, store } = inputs
+  const state = effectiveContactState(inputs)
   let multiplier = policy.rates.stateMultipliers[state] ?? 1
 
   // Session-level backoff set by timelock detection, decaying linearly to 1.
@@ -106,6 +123,16 @@ function sessionStopped({ session }: GateInputs): GateResult {
   }
 }
 
+function groupBlocked({ policy, ctx }: GateInputs): GateResult {
+  if (policy.groups.mode !== 'block' || !isGroupChatId(ctx.chatId)) return allow
+  return {
+    kind: 'deny',
+    status: 403,
+    code: 'guard.group_blocked',
+    reason: 'policy refuses group sends from this session',
+  }
+}
+
 function optOut({ policy, contact }: GateInputs): GateResult {
   if (!policy.optOut.enabled) return allow
   if (contact.state !== 'opted_out') return allow
@@ -117,8 +144,10 @@ function optOut({ policy, contact }: GateInputs): GateResult {
   }
 }
 
-function humanTouch({ policy, contact }: GateInputs): GateResult {
+function humanTouch(inputs: GateInputs): GateResult {
+  const { policy, contact } = inputs
   if (!policy.contacts.requireHumanTouch) return allow
+  if (groupExempt(inputs)) return allow
   if (contact.human_touch_at !== null) return allow
   return {
     kind: 'deny',
@@ -129,7 +158,9 @@ function humanTouch({ policy, contact }: GateInputs): GateResult {
   }
 }
 
-function handshake({ policy, contact }: GateInputs): GateResult {
+function handshake(inputs: GateInputs): GateResult {
+  const { policy, contact } = inputs
+  if (groupExempt(inputs)) return allow
   if (contact.in_count > 0) return allow
   if (contact.out_count < policy.contacts.handshakeMaxMessages) return allow
   return {
@@ -140,9 +171,12 @@ function handshake({ policy, contact }: GateInputs): GateResult {
   }
 }
 
-function strangerCap({ policy, store, contact, ctx }: GateInputs): GateResult {
+function strangerCap(inputs: GateInputs): GateResult {
+  const { policy, store, contact, ctx } = inputs
   const limit = policy.contacts.maxNewStrangersPerDay
   if (!Number.isFinite(limit)) return allow
+  // A group you were added to is not a stranger you chose to cold-message.
+  if (groupExempt(inputs)) return allow
   // Only a *first ever* send to a chat consumes the new-contact budget.
   if (contact.out_count > 0) return allow
   const cutoff = ctx.now - DAY
@@ -171,9 +205,11 @@ function warmupBudget({ policy, store, session, ctx }: GateInputs): GateResult {
   }
 }
 
-function warmupNewContacts({ policy, store, session, contact, ctx }: GateInputs): GateResult {
+function warmupNewContacts(inputs: GateInputs): GateResult {
+  const { policy, store, session, contact, ctx } = inputs
   const step = warmupStep(policy, session, ctx.now)
   if (!step || contact.out_count > 0) return allow
+  if (groupExempt(inputs)) return allow
   const cutoff = ctx.now - DAY
   if (store.countNewContactsSince(ctx.session, cutoff) < step.maxNewContactsPerDay) return allow
   const until = store.newContactSlotFreesAt(ctx.session, cutoff, step.maxNewContactsPerDay, DAY)
@@ -185,11 +221,12 @@ function warmupNewContacts({ policy, store, session, contact, ctx }: GateInputs)
   }
 }
 
-function timelock({ policy, session, contact, ctx }: GateInputs): GateResult {
+function timelock(inputs: GateInputs): GateResult {
+  const { policy, session, ctx } = inputs
   if (!policy.timelock.enabled) return allow
   if (session.timelock_until === null || session.timelock_until <= ctx.now) return allow
   if (!policy.timelock.strangersBlockedWhileDegraded) return allow
-  if (contact.state === 'known') return allow
+  if (effectiveContactState(inputs) === 'known') return allow
   return {
     kind: 'wait',
     until: session.timelock_until,
@@ -199,10 +236,11 @@ function timelock({ policy, session, contact, ctx }: GateInputs): GateResult {
 }
 
 function replyRatio(inputs: GateInputs): GateResult {
-  const { policy, contact } = inputs
+  const { policy } = inputs
   if (!policy.replyRatio.enabled || policy.replyRatio.action === 'slow') return allow
   if (!replyRatioBreached(inputs)) return allow
-  if (policy.replyRatio.action === 'block-strangers' && contact.state === 'known') return allow
+  if (policy.replyRatio.action === 'block-strangers' && effectiveContactState(inputs) === 'known')
+    return allow
   return {
     kind: 'deny',
     status: 429,
@@ -264,6 +302,7 @@ function spacing(inputs: GateInputs): GateResult {
  */
 const GATES: ((inputs: GateInputs) => GateResult)[] = [
   sessionStopped,
+  groupBlocked,
   optOut,
   humanTouch,
   handshake,

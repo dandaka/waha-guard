@@ -172,6 +172,7 @@ so a client can branch on the reason without parsing prose.
 | `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
 | `guard.handshake_exhausted` | 403 | Unanswered-message limit for this contact reached. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
+| `guard.group_blocked` | 403 | Policy refuses group sends from this session. |
 | `guard.unidentified_recipient` | 400 | No `chatId` in the request, so contact policy is blind. |
 | `guard.reply_ratio` | 429 | Sending far more than is coming back. |
 | `guard.quiet_hours` · `guard.quiet_day` | 429 | Outside the allowed hours for this recipient. |
@@ -199,8 +200,15 @@ actually reflects how these accounts survive: **refuse to send to any contact a 
 never messaged**. Make first contact by hand; automation takes over from the reply. It is on
 by default in the `conservative` preset (`contacts.requireHumanTouch`).
 
+Group (`@g.us`) and channel (`@newsletter`) chats are exempt from the contact gates by
+default, because every one of them describes a relationship with a person and a group does
+not have one — `requireHumanTouch` on a group you own is a refusal to post to your own
+announcement channel. They still count against the rate windows, quiet hours and pacing,
+since they consume the same real quota. See `groups.mode` for `contact` and `block`.
+
 Opt-out keywords are matched against the whole normalized message, not as a substring, so
-"can you stop by tomorrow?" is not an opt-out. A human replying by hand from the phone
+"can you stop by tomorrow?" is not an opt-out. They are not matched in groups at all, where
+any one participant could otherwise mute the channel for everyone. A human replying by hand from the phone
 clears an opt-out — a person who just typed a message knows something the guard does not.
 
 ## State

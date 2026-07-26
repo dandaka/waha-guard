@@ -59,6 +59,17 @@ contacts:
   # How many messages may go to someone who has never replied.
   handshakeMaxMessages: 1
 
+groups:
+  # Group (@g.us) and channel (@newsletter) chats have no individual on the other end, so
+  # the contact gates do not describe them: requireHumanTouch on a group you own is a
+  # refusal to post to your own announcement channel, and handshakeMaxMessages mutes it
+  # after one message nobody replied to.
+  #   exempt  — skip the contact gates. Rate windows, quiet hours and pacing still apply,
+  #             because a group consumes the same real quota as anyone else.
+  #   contact — treat a group like any other contact.
+  #   block   — refuse group sends outright.
+  mode: exempt
+
 replyRatio:
   enabled: true
   maxOutPerIn: 3

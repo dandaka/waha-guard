@@ -31,6 +31,15 @@ export type UnknownSendRouteAction = 'block' | 'pass'
 
 export type ReplyRatioAction = 'block-strangers' | 'block-all' | 'slow'
 
+/** How group and channel chats are treated by the contact gates. */
+export type GroupMode =
+  /** Contact gates do not apply. Rate windows, quiet hours and pacing still do. */
+  | 'exempt'
+  /** Treat a group like any other contact. Rarely what you want; here for completeness. */
+  | 'contact'
+  /** Refuse group sends outright. */
+  | 'block'
+
 export interface QuietHoursPolicy {
   enabled: boolean
   /** IANA zone, e.g. 'Europe/Lisbon'. Recipient-local is the intent; per-session override it. */
@@ -82,6 +91,14 @@ export interface ContactPolicy {
   maxNewStrangersPerDay: number
   /** Messages allowed to a contact that has never replied. */
   handshakeMaxMessages: number
+}
+
+export interface GroupPolicy {
+  /**
+   * Groups still consume the same real quota as anyone else, so `exempt` skips only the
+   * contact gates — the rate windows, quiet hours and pacing all continue to apply.
+   */
+  mode: GroupMode
 }
 
 export interface ReplyRatioPolicy {
@@ -163,6 +180,7 @@ export interface SessionPolicy {
   rates: RatePolicy
   warmup: WarmupPolicy
   contacts: ContactPolicy
+  groups: GroupPolicy
   replyRatio: ReplyRatioPolicy
   optOut: OptOutPolicy
   typing: TypingPolicy
@@ -219,6 +237,7 @@ const conservative: SessionPolicy = {
     maxNewStrangersPerDay: 5,
     handshakeMaxMessages: 1,
   },
+  groups: { mode: 'exempt' },
   replyRatio: {
     enabled: true,
     maxOutPerIn: 3,

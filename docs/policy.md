@@ -108,6 +108,25 @@ The relationship gates. These are the ones that matter.
 turned off for the wrong reason. It encodes the pattern that actually works: a human makes
 first contact, automation takes over from the reply.
 
+## `groups`
+
+| Key | Default | Provenance |
+|---|---|---|
+| `mode` | `exempt` | **judgement.** `exempt` \| `contact` \| `block` |
+
+Every gate under `contacts` describes a relationship with a person, and a group chat does not
+have one. Applied literally, `requireHumanTouch` refuses to post to an announcement group the
+business owns, and `handshakeMaxMessages: 1` mutes it permanently the first time nobody
+happens to reply. `exempt` skips the contact gates for `@g.us` and `@newsletter` chats.
+
+What it does **not** skip is the rate windows, quiet hours and pacing: a group message
+consumes the same quota and is just as unwelcome at 3am. Nor does it skip opt-out — a group
+that was opted out by hand stays opted out, since that is a state a human set deliberately.
+
+Groups are also excluded from *automatic* opt-out. Keyword matching runs on inbound messages,
+and in a group any one participant could otherwise mute the channel for everyone by typing
+"stop".
+
 ## `replyRatio`
 
 | Key | Default | Provenance |
