@@ -5,8 +5,10 @@
  * discovers that `sendImage` is unguarded and moves its traffic there. Every route that
  * puts a message on the wire must be intercepted, or the guard is decorative.
  *
- * Verified against WAHA's `src/api/chatting.controller.ts` (`@Controller('api')`) and
- * `src/api/*.controller.ts` for the session-scoped variants.
+ * This table has not been audited against a specific WAHA release, and a hand-maintained
+ * list of someone else's endpoints will always lag. That is why an unrecognised
+ * send-shaped path fails closed instead of passing through: the guard does not need the
+ * list to be complete, it needs to notice when it is not.
  */
 
 export type RouteKind =

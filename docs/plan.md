@@ -59,7 +59,8 @@ interception is opt-in policy layered on top of a dumb pipe.
 ## Intercepted endpoints
 
 All send endpoints must be intercepted, or callers bypass the guard by using `sendImage`.
-Verified against `src/api/chatting.controller.ts` (`@Controller('api')`), all under `/api/`:
+Taken from WAHA's documented chatting API, all under `/api/` — not audited against a
+specific release:
 
 `sendText` `sendImage` `sendFile` `sendVoice` `sendVideo` `sendButtons` `sendList`
 `sendPoll` `sendPollVote` `sendLocation` `sendContactVcard` `sendLinkPreview`
@@ -123,7 +124,7 @@ the boundary, which is the off-by-one the sliding design exists to avoid.
 
 ## Webhook observation
 
-Event names verified in `src/structures/enums.dto.ts`:
+Event names as documented by WAHA, not audited against a specific release:
 
 | Event | Feeds |
 |---|---|

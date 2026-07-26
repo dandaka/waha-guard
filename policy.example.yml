@@ -1,7 +1,7 @@
 # waha-guard policy
 #
 # Start from a preset, override what you need. Every number is documented in docs/policy.md,
-# including which ones are measured and which are guesses. Most are guesses.
+# including where it came from. None are measurements; most are conservative guesses.
 #
 # Mount this at /etc/guard/policy.yml and set GUARD_POLICY to point at it.
 

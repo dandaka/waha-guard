@@ -2,8 +2,8 @@
  * Policy schema and presets.
  *
  * Every number here is a policy choice, not a law of physics. The provenance of each
- * default is documented in docs/policy.md — which ones are measured, which are guesses.
- * Treat the guesses as guesses.
+ * default is documented in docs/policy.md. None of them are measurements; most are
+ * conservative guesses. Treat them as guesses.
  */
 
 export type PresetName = 'conservative' | 'balanced' | 'off'

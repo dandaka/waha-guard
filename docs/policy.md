@@ -7,10 +7,14 @@ Every knob, what it does, and — for the numeric defaults — **where the numbe
 There is no public rate limit for WhatsApp. Nobody outside Meta knows the thresholds, and
 anyone who tells you they do is quoting folklore. So each default below is tagged:
 
-- **measured** — derived from something observable (a protocol behaviour, a timing we can
-  verify against a running WAHA).
+- **measured** — verified against something observable (a protocol behaviour, a timing
+  checked against a running WAHA). Nothing here currently carries this tag; it is kept so
+  that a contributed measurement has somewhere to land.
 - **modelled** — computed from a model that is itself defensible (typing speed from
   published WPM distributions for adults on a phone keyboard).
+- **reported** — taken from documentation or from what other people have observed and
+  written down, but not confirmed here.
+- **convention** — a definition rather than an observation.
 - **guess** — a conservative number chosen because it is well under any plausible threshold.
   Most of the rate numbers are this. They are not safe *because* they are these values; they
   are chosen to be boring.
@@ -136,10 +140,10 @@ who just typed a message knows something the guard does not.
 
 | Key | Default | Provenance |
 |---|---|---|
-| `wpmMean` | 42 | **modelled** — adult typing on a phone keyboard clusters in the high 30s to mid 40s WPM |
+| `wpmMean` | 42 | **modelled** — assumes adult phone-keyboard typing in the high 30s to mid 40s WPM. Not measured here; no source is cited for it. |
 | `wpmStddev` | 12 | **modelled** |
 | `wpmMin` / `wpmMax` | 20 / 80 | **modelled** — truncation bounds |
-| `charsPerWord` | 5 | **measured** — the standard definition of a "word" in WPM |
+| `charsPerWord` | 5 | **convention** — five characters is the standard definition of a "word" in WPM |
 | `maxPlanMs` | 25000 | **guess** — caps how long a plan can hold a `block`-mode request open |
 | `refreshMs` | 8000 | **guess.** The `composing` presence expires server-side; ~10s is the commonly cited figure, and this sits under it. Verify against your engine. |
 | `pauseMinMs` / `pauseMaxMs` | 700 / 2500 | **guess** — "thinking" gaps between bursts |
@@ -154,8 +158,8 @@ a human typed it.
 | Key | Default | Provenance |
 |---|---|---|
 | `enabled` | `true` | — |
-| `detectStatuses` | `[429, 463]` | **measured** — 463 is the timelock status seen on the wire |
-| `detectBodyPatterns` | `rate-overlimit`, `timelock`, `too many requests` | **measured** — substrings that appear in upstream error bodies |
+| `detectStatuses` | `[429, 463]` | **reported** — 463 is widely described as the timelock status, but has not been observed by this project |
+| `detectBodyPatterns` | `rate-overlimit`, `timelock`, `too many requests` | **reported** — substrings commonly described in upstream error bodies. Check yours and add to the list. |
 | `degradeMinutes` | 60 | **guess** |
 | `degradedMultiplier` | 5 | **guess** — spacing multiplier at the moment of detection |
 | `recoveryHours` | 24 | **guess** — the multiplier decays linearly back to 1 over this period |

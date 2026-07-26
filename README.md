@@ -237,8 +237,9 @@ Run `mode: observe` to evaluate every gate and log what it *would* have done wit
 blocking anything. That is the safe way to introduce the guard to live traffic.
 
 See [`policy.example.yml`](policy.example.yml) for every key with comments, and
-[`docs/policy.md`](docs/policy.md) for the reference — which documents **which numbers are
-measured and which are guesses**. Most of them are guesses. Treat them that way.
+[`docs/policy.md`](docs/policy.md) for the reference — which tags **where every default came
+from**. None of them are measurements. Most are conservative guesses, and they are safe only
+in the sense of being boring. Treat them that way.
 
 ## Guard endpoints
 
