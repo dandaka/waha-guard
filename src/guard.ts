@@ -401,6 +401,37 @@ export class Guard {
       })
     }
 
+    if (req.method === 'POST' && path === '/_guard/contact/human-touch') {
+      const body = (await req.json().catch(() => null)) as {
+        session?: string
+        chatId?: string
+        chatIds?: unknown
+        touchedAt?: number
+      } | null
+      const session = body?.session ?? 'default'
+      const ids = Array.isArray(body?.chatIds)
+        ? body.chatIds.filter((v): v is string => typeof v === 'string' && v.length > 0)
+        : body?.chatId
+          ? [body.chatId]
+          : []
+      if (ids.length === 0)
+        return this.guardError(400, 'guard.bad_request', 'chatId or chatIds is required')
+
+      const now = this.clock.now()
+      const marked: string[] = []
+      const already: string[] = []
+      for (const chatId of ids) {
+        if (this.store.markHumanTouch(session, chatId, now, body?.touchedAt)) marked.push(chatId)
+        else already.push(chatId)
+      }
+      this.log.info('human touch recorded', {
+        session,
+        marked: marked.length,
+        already: already.length,
+      })
+      return Response.json({ guard: true, session, marked, already })
+    }
+
     if (req.method === 'POST' && path === '/_guard/resume') {
       const body = (await req.json().catch(() => null)) as { session?: string } | null
       const session = body?.session ?? 'default'

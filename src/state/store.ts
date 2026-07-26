@@ -195,6 +195,34 @@ export class Store {
       .run(to, session, chatId)
   }
 
+  /**
+   * Record that a human has already spoken to this contact, without inventing a message.
+   *
+   * The guard only learns a relationship from a webhook it has seen, so on the day it is
+   * introduced its graph is empty and `requireHumanTouch` refuses every contact the account
+   * has been talking to for months. This is the write path for that: adopt the history the
+   * guard was not around to observe, and for deliberately unlocking one contact later.
+   *
+   * Deliberately *not* `recordHumanOutbound`: that inserts a `sends` row and bumps
+   * `out_count`. Backfilling a year of contacts through it would land them all in the
+   * current rate window and pace the account as though it had just sent them all at once.
+   * A touch is a statement about the past; it must not consume today's quota.
+   *
+   * Returns false when the contact was already touched, so a re-run is a no-op rather than
+   * a lie about when the relationship started.
+   */
+  markHumanTouch(session: string, chatId: string, now: number, touchedAt?: number): boolean {
+    return this.db.transaction(() => {
+      const existing = this.ensureContact(session, chatId, now)
+      if (existing.human_touch_at !== null) return false
+      this.db
+        .query('UPDATE contacts SET human_touch_at = ? WHERE session = ? AND chat_id = ?')
+        .run(touchedAt ?? now, session, chatId)
+      this.promoteContact(session, chatId, 'known', now)
+      return true
+    })()
+  }
+
   markOptOut(session: string, chatId: string, now: number): void {
     this.ensureContact(session, chatId, now)
     this.db

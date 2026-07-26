@@ -200,6 +200,22 @@ actually reflects how these accounts survive: **refuse to send to any contact a 
 never messaged**. Make first contact by hand; automation takes over from the reply. It is on
 by default in the `conservative` preset (`contacts.requireHumanTouch`).
 
+**On the day you introduce the guard, that graph is empty.** It only knows relationships it
+has watched happen, so every contact the account has been talking to for months reads as
+untouched and `requireHumanTouch` refuses all of them until each one writes in again. Adopt
+that history with `POST /_guard/contact/human-touch` before switching to `enforce`:
+
+```bash
+curl -X POST localhost:3010/_guard/contact/human-touch \
+  -H 'content-type: application/json' \
+  -d '{"session":"default","chatIds":["351900000000@c.us","351900000001@c.us"]}'
+```
+
+It records the relationship without inventing a message — no `sends` row, so backfilling a
+year of contacts does not land them all in today's rate window. Re-running is a no-op, and
+it will not resurrect someone who opted out. The same endpoint is how you deliberately
+unlock a single contact later.
+
 Group (`@g.us`) and channel (`@newsletter`) chats are exempt from the contact gates by
 default, because every one of them describes a relationship with a person and a group does
 not have one — `requireHumanTouch` on a group you own is a refusal to post to your own
@@ -262,6 +278,7 @@ All namespaced under `/_guard/` so they cannot shadow a WAHA route.
 | `GET /_guard/contact?session=&chatId=` | what the guard knows about a contact |
 | `GET /_guard/queue/{guardId}` | status of a queued send |
 | `POST /_guard/opt-out` · `/_guard/opt-in` | manual opt-out management |
+| `POST /_guard/contact/human-touch` | record that a human already spoke to a contact (`chatId` or `chatIds`) |
 | `POST /_guard/resume` | clear a stopped session after you have checked it |
 
 ## Status
