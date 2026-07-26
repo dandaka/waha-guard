@@ -1,0 +1,115 @@
+/**
+ * WAHA payload shapes differ by engine (`gows` / `noweb` / `webjs`), so anything that
+ * reaches into a payload does it here and tolerates all of them.
+ */
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+/**
+ * Every string that could plausibly identify this message, most-specific first.
+ * `_serialized` / a bare string `id` are the forms that also appear on webhook payloads,
+ * which is what makes ack and echo matching work across engines.
+ */
+export function messageIdCandidates(value: unknown): string[] {
+  const out: string[] = []
+  const push = (v: unknown) => {
+    if (typeof v === 'string' && v.length > 0 && !out.includes(v)) out.push(v)
+  }
+  const root = asRecord(value)
+  if (!root) return out
+
+  const id = root.id
+  if (typeof id === 'string') push(id)
+  const idObj = asRecord(id)
+  if (idObj) {
+    push(idObj._serialized)
+    push(idObj.id)
+  }
+  const key = asRecord(root.key)
+  if (key) push(key.id)
+
+  const messages = root.messages
+  if (Array.isArray(messages)) for (const m of messages) out.push(...messageIdCandidates(m))
+
+  push(root.messageId)
+  return out
+}
+
+export function primaryMessageId(value: unknown): string | null {
+  return messageIdCandidates(value)[0] ?? null
+}
+
+export interface ObservedMessage {
+  chatId: string | null
+  fromMe: boolean
+  body: string
+  ids: string[]
+}
+
+export function observeMessage(payload: unknown): ObservedMessage | null {
+  const p = asRecord(payload)
+  if (!p) return null
+  const fromMe = p.fromMe === true || asRecord(p.id)?.fromMe === true
+  const chatId =
+    (typeof p.chatId === 'string' && p.chatId) ||
+    (fromMe ? typeof p.to === 'string' && p.to : typeof p.from === 'string' && p.from) ||
+    (typeof p.from === 'string' ? p.from : null) ||
+    null
+  const body =
+    (typeof p.body === 'string' && p.body) ||
+    (typeof p.caption === 'string' && p.caption) ||
+    (typeof p.text === 'string' && p.text) ||
+    ''
+  return { chatId: chatId || null, fromMe, body, ids: messageIdCandidates(p) }
+}
+
+/** WAHA ack levels; `ackName` is the string form on some engines. */
+const ACK_NAMES: Record<string, number> = {
+  ERROR: -1,
+  PENDING: 0,
+  SERVER: 1,
+  DEVICE: 2,
+  READ: 3,
+  PLAYED: 4,
+}
+
+export function ackLevel(payload: unknown): number | null {
+  const p = asRecord(payload)
+  if (!p) return null
+  if (typeof p.ack === 'number') return p.ack
+  if (typeof p.ackName === 'string' && p.ackName in ACK_NAMES) return ACK_NAMES[p.ackName]!
+  return null
+}
+
+/**
+ * The chat id a send request targets. `chatId` is the documented field; `to` and `phone`
+ * appear on a few routes and in older client code.
+ */
+export function chatIdFromSendBody(body: unknown): string | null {
+  const b = asRecord(body)
+  if (!b) return null
+  for (const field of ['chatId', 'to', 'phone', 'groupId']) {
+    const v = b[field]
+    if (typeof v === 'string' && v.length > 0) return v
+  }
+  const message = asRecord(b.message)
+  if (message) return chatIdFromSendBody(message)
+  return null
+}
+
+export function sessionFromSendBody(body: unknown): string | null {
+  const b = asRecord(body)
+  const v = b?.session
+  return typeof v === 'string' && v.length > 0 ? v : null
+}
+
+export function textFromSendBody(body: unknown, field: 'text' | 'caption' | null): string {
+  if (!field) return ''
+  const b = asRecord(body)
+  const v = b?.[field]
+  return typeof v === 'string' ? v : ''
+}

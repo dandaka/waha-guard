@@ -1,0 +1,25 @@
+{
+  "name": "waha-guard",
+  "version": "0.1.0",
+  "description": "Anti-ban sidecar for WAHA: a transparent reverse proxy that adds pacing, contact-graph, and presence policy to the WhatsApp HTTP API",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dandaka/waha-guard.git"
+  },
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}

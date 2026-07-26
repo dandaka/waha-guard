@@ -1,0 +1,14 @@
+# Internal planning doc: references private repo paths and an internal incident write-up.
+# Deliberately not published — the public design notes live in README.md and docs/policy.md.
+docs/plan.md
+
+node_modules/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+/state/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

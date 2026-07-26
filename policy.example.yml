@@ -1,0 +1,127 @@
+# waha-guard policy
+#
+# Start from a preset, override what you need. Every number is documented in docs/policy.md,
+# including which ones are measured and which are guesses. Most are guesses.
+#
+# Mount this at /etc/guard/policy.yml and set GUARD_POLICY to point at it.
+
+preset: conservative
+
+# `enforce` blocks. `observe` evaluates every gate, logs what it would have done, and
+# forwards anyway — the safe way to introduce the guard to live traffic.
+mode: enforce
+
+# Who owns typing indicators. Exactly one side must, or they interleave visibly.
+# guard | caller | off
+presence: guard
+
+backpressure:
+  # block: hold the request until the message goes out (keeps WAHA's synchronous contract)
+  # queue: return 202 + a guard id, send later, emit guard.sent / guard.dropped
+  mode: block
+  maxWaitMs: 120000
+
+quietHours:
+  enabled: true
+  # Set this. The intent is recipient-local time; the default of UTC is a placeholder.
+  timezone: Europe/Lisbon
+  start: '21:00'
+  end: '09:00'
+  days: [] # weekdays the window starts on, 0 = Sunday. empty = every day
+  quietDays: [] # whole days that are quiet end to end
+
+rates:
+  # Sliding windows per session. `null` means no limit.
+  perMinute: 3
+  perHour: 30
+  perDay: 150
+  minSpacingMs: 20000
+  jitterStddevMs: 8000
+  stateMultipliers:
+    known: 1
+    handshake_sent: 2
+    stranger: 3
+
+warmup:
+  enabled: true
+  # The last step applies indefinitely. Counted from when the guard first saw the session.
+  schedule:
+    - { fromDay: 0, maxPerDay: 20, maxNewContactsPerDay: 5 }
+    - { fromDay: 3, maxPerDay: 40, maxNewContactsPerDay: 10 }
+    - { fromDay: 7, maxPerDay: 80, maxNewContactsPerDay: 15 }
+    - { fromDay: 14, maxPerDay: 150, maxNewContactsPerDay: 25 }
+
+contacts:
+  # Refuse to send to anyone a human has never messaged from this number. Make first
+  # contact by hand; automation takes over from the reply. This is the gate that matters.
+  requireHumanTouch: true
+  maxNewStrangersPerDay: 5
+  # How many messages may go to someone who has never replied.
+  handshakeMaxMessages: 1
+
+replyRatio:
+  enabled: true
+  maxOutPerIn: 3
+  minSamples: 20
+  windowHours: 24
+  # block-strangers | block-all | slow
+  action: block-strangers
+  slowMultiplier: 2
+
+optOut:
+  enabled: true
+  # Matched against the whole normalized message, not as a substring.
+  keywords:
+    - stop
+    - unsubscribe
+    - remove me
+    - opt out
+    - optout
+    - no thanks
+
+typing:
+  enabled: true
+  wpmMean: 42
+  wpmStddev: 12
+  wpmMin: 20
+  wpmMax: 80
+  charsPerWord: 5
+  maxPlanMs: 25000
+  # `composing` expires server-side; re-issue under that interval.
+  refreshMs: 8000
+  pauseMinMs: 700
+  pauseMaxMs: 2500
+
+timelock:
+  enabled: true
+  detectStatuses: [429, 463]
+  detectBodyPatterns: ['rate-overlimit', 'rate overlimit', 'timelock', 'too many requests']
+  degradeMinutes: 60
+  degradedMultiplier: 5
+  recoveryHours: 24
+  strangersBlockedWhileDegraded: true
+
+ack:
+  enabled: true
+  sampleSize: 50
+  maxUndeliveredRatio: 0.3
+  slowMultiplier: 2
+  graceMinutes: 10
+
+routes:
+  # A path that looks like a send but is not in the guard's route table is refused, so a
+  # new WAHA release cannot quietly open an unguarded bypass. Waive one consciously here.
+  unknownSends: block
+  waived: []
+
+# Per-session overrides, deep-merged over everything above.
+sessions:
+  support:
+    # Inbound support replies are a conversation, not outreach.
+    contacts:
+      requireHumanTouch: false
+      handshakeMaxMessages: 5
+    rates:
+      minSpacingMs: 5000
+    quietHours:
+      enabled: false

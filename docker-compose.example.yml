@@ -1,0 +1,40 @@
+# Reference deployment.
+#
+# Note what is deliberately missing: WAHA publishes no port. The guard is the only thing
+# that can reach it, which is what stops an app from quietly bypassing the guard by
+# talking to WAHA directly. It also means killing the guard stops all outbound traffic —
+# that is the trade, and it is why the healthcheck is not optional.
+
+services:
+  waha:
+    image: devlikeapro/waha:latest
+    restart: unless-stopped
+    # No `ports:` — only waha-guard reaches it.
+    environment:
+      # WAHA posts its webhooks to the guard, which forwards them to your app.
+      WHATSAPP_HOOK_URL: http://waha-guard:3000/_guard/webhook
+      WHATSAPP_HOOK_EVENTS: message,message.any,message.ack,session.status
+    volumes:
+      - waha_sessions:/app/.sessions
+
+  waha-guard:
+    build: .
+    # image: ghcr.io/dandaka/waha-guard:latest
+    restart: unless-stopped
+    depends_on:
+      - waha
+    ports:
+      - '3010:3000'
+    environment:
+      GUARD_UPSTREAM: http://waha:3000
+      GUARD_WEBHOOK_TARGET: https://app.example.com/webhook
+      GUARD_POLICY: /etc/guard/policy.yml
+      GUARD_STATE: /var/lib/guard/guard.sqlite
+      GUARD_LOG_LEVEL: info
+    volumes:
+      - guard_state:/var/lib/guard
+      - ./policy.example.yml:/etc/guard/policy.yml:ro
+
+volumes:
+  waha_sessions:
+  guard_state:
