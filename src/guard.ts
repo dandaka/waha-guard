@@ -1,6 +1,7 @@
 import type { GuardConfig } from './config.ts'
 import { createLogger, type Logger } from './observability/log.ts'
 import { Metrics } from './observability/metrics.ts'
+import { warmupStep } from './pipeline/gates.ts'
 import { Sender } from './pipeline/sender.ts'
 import { forSession } from './policy/load.ts'
 import type { Policy } from './policy/schema.ts'
@@ -367,15 +368,30 @@ export class Guard {
         preset: this.policy.preset,
         webhookTarget: this.options.config.webhookTarget,
         queueDepth: this.store.queuedDepth(),
-        sessions: this.store.listSessions().map((s) => ({
-          session: s.session,
-          stopped: s.stopped_reason,
-          degradedUntil: s.timelock_until && s.timelock_until > now ? s.timelock_until : null,
-          rateMultiplier: s.rate_multiplier,
-          warmupDay: Math.floor((now - s.warmup_started_at) / 86_400_000),
-          inFlight: this.sender.queueDepth(s.session),
-          queued: this.store.queuedDepth(s.session),
-        })),
+        sessions: this.store.listSessions().map((s) => {
+          const policy = forSession(this.policy, s.session)
+          const step = warmupStep(policy, s, now)
+          const cutoff = now - 86_400_000
+          return {
+            session: s.session,
+            stopped: s.stopped_reason,
+            degradedUntil: s.timelock_until && s.timelock_until > now ? s.timelock_until : null,
+            rateMultiplier: s.rate_multiplier,
+            warmupDay: Math.floor((now - s.warmup_started_at) / 86_400_000),
+            // The warmup ramp comes from the preset unless policy.yml overrides it, so an
+            // operator reading the mounted file cannot see which caps are actually in force
+            // — and two independent new-contact caps means the lower one wins silently.
+            newContactCaps: {
+              spentToday: this.store.countNewStrangersSince(s.session, cutoff),
+              maxNewStrangersPerDay: policy.contacts.maxNewStrangersPerDay,
+              warmupMaxNewContactsPerDay: step?.maxNewContactsPerDay ?? null,
+              warmupMaxPerDay: step?.maxPerDay ?? null,
+              warmupFromDay: step?.fromDay ?? null,
+            },
+            inFlight: this.sender.queueDepth(s.session),
+            queued: this.store.queuedDepth(s.session),
+          }
+        }),
       })
     }
 

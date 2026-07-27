@@ -562,22 +562,41 @@ export class Store {
     return row.t
   }
 
-  /** Distinct chats that received their *first ever* guard send since `cutoff`. */
-  countNewContactsSince(session: string, cutoff: number): number {
+  /**
+   * Chats whose first ever outbound was *us* opening the conversation — the cold sends.
+   *
+   * A chat this session had already heard from before it first wrote is a reply, not cold
+   * outreach, and must not spend the cold-outreach budget. Charging it was the defect: a
+   * morning of inbound candidates exhausted the day's budget and the guard then silenced
+   * the replies, while genuine cold sends stayed allowed.
+   *
+   * The test is inbound-before-first-send, not "does the contact have a human touch". Under
+   * `requireHumanTouch` every send the guard permits is to a touched contact — a batch of
+   * cold numbers unlocked through `markHumanTouch` included — so keying on the touch bit
+   * would exempt exactly the traffic this budget exists to cap. A stranger who replies
+   * *after* we wrote also gets a touch, and that conversation was still ours to start.
+   *
+   * `inbound.chat_id` is resolved and folded by `linkIdentity`, so a reply that arrived
+   * under a `@lid` exempts the `@c.us` chat once the two are known to be one person.
+   */
+  private static readonly COLD_OPENS = `
+    SELECT f.chat_id, f.first_send FROM (
+      SELECT chat_id, MIN(sent_at) AS first_send FROM sends WHERE session = ?1 GROUP BY chat_id
+    ) AS f
+    WHERE f.first_send > ?2 AND NOT EXISTS (
+      SELECT 1 FROM inbound i
+      WHERE i.session = ?1 AND i.chat_id = f.chat_id AND i.at <= f.first_send
+    )`
+
+  countNewStrangersSince(session: string, cutoff: number): number {
     const row = this.db
-      .query(
-        `SELECT COUNT(*) AS n FROM (
-           SELECT chat_id, MIN(sent_at) AS first_send
-           FROM sends WHERE session = ?
-           GROUP BY chat_id
-         ) WHERE first_send > ?`,
-      )
+      .query(`SELECT COUNT(*) AS n FROM (${Store.COLD_OPENS})`)
       .get(session, cutoff) as { n: number }
     return row.n
   }
 
   /** When the new-contact budget frees a slot, mirroring slotFreesAt for first sends. */
-  newContactSlotFreesAt(
+  newStrangerSlotFreesAt(
     session: string,
     cutoff: number,
     limit: number,
@@ -586,11 +605,9 @@ export class Store {
     if (!Number.isFinite(limit)) return null
     const row = this.db
       .query(
-        `SELECT first_send FROM (
-           SELECT chat_id, MIN(sent_at) AS first_send FROM sends WHERE session = ? GROUP BY chat_id
-         ) WHERE first_send > ?
+        `SELECT first_send FROM (${Store.COLD_OPENS})
          ORDER BY first_send DESC
-         LIMIT 1 OFFSET ?`,
+         LIMIT 1 OFFSET ?3`,
       )
       .get(session, cutoff, Math.max(0, limit - 1)) as { first_send: number } | null
     return row ? row.first_send + windowMs : null

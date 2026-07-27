@@ -180,7 +180,7 @@ so a client can branch on the reason without parsing prose.
 | `guard.rate_minute` · `_hour` · `_day` | 429 | Sliding window full. `Retry-After` is exact. |
 | `guard.spacing` | 429 | Too soon after the previous message. |
 | `guard.warmup_budget` · `guard.warmup_new_contacts` | 429 | Warmup ramp for this session is spent. |
-| `guard.new_contact_budget` | 429 | Daily new-conversation limit reached. |
+| `guard.new_contact_budget` | 429 | Daily limit on conversations *this number* starts. |
 | `guard.degraded` | 429 | Upstream signalled a rate limit; only replies are going out. |
 | `guard.session_stopped` | 503 | Session is `FAILED` / logged out. Nothing will send. |
 | `guard.upstream_unreachable` | 502 | WAHA did not answer. Nothing was sent. |
@@ -216,6 +216,25 @@ It records the relationship without inventing a message — no `sends` row, so b
 year of contacts does not land them all in today's rate window. Re-running is a no-op, and
 it will not resurrect someone who opted out. The same endpoint is how you deliberately
 unlock a single contact later.
+
+### Who contacted whom
+
+Two new-contact budgets ration how many conversations a number **starts** in a day:
+`contacts.maxNewStrangersPerDay` and the warmup ramp's `maxNewContactsPerDay`. They are
+about cold outreach, which is what gets numbers banned — not about how busy you are.
+
+So a chat the guard has seen an inbound message from before it ever wrote is **not** charged
+to either budget. Answering someone who just messaged you is the safest traffic an account
+has, and the opposite risk profile from messaging a stranger off a list; putting both on one
+counter means a morning of replies can silence the afternoon's. The exemption follows the
+identity fold below, so a reply that arrived as `@lid` exempts the `@c.us` chat you answer
+on.
+
+A human touch does **not** waive the budget. `POST /_guard/contact/human-touch` and a message
+typed on the phone both satisfy `requireHumanTouch`, and under that gate they are how every
+permitted cold send is unlocked in the first place — waiving the budget for them would leave
+it capping nothing. `GET /_guard/status` reports both caps and what today has spent, since
+the warmup ramp usually comes from the preset and is invisible in `policy.yml`.
 
 Group (`@g.us`) and channel (`@newsletter`) chats are exempt from the contact gates by
 default, because every one of them describes a relationship with a person and a group does
@@ -305,7 +324,7 @@ All namespaced under `/_guard/` so they cannot shadow a WAHA route.
 | Endpoint | |
 |---|---|
 | `GET /_guard/health` | liveness |
-| `GET /_guard/status` | per-session warmup day, degraded state, queue depth |
+| `GET /_guard/status` | per-session warmup day, degraded state, queue depth, and both new-contact caps with today's spend |
 | `GET /_guard/metrics` | Prometheus |
 | `GET /_guard/policy?session=` | the effective resolved policy |
 | `GET /_guard/contact?session=&chatId=` | what the guard knows about a contact, and every id it believes is that person |

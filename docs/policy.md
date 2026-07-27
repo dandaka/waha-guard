@@ -91,6 +91,15 @@ A new number that immediately sends at full rate is the most obvious pattern the
 `fromDay` is counted from `session_state.warmup_started_at`, which is set the first time the
 guard sees a session and persists across restarts. The last step applies indefinitely.
 
+`maxNewContactsPerDay` is a **second, independent cap** on top of
+`contacts.maxNewStrangersPerDay`, and the lower one wins. A preset supplies it even when
+`policy.yml` never mentions `warmup`, so raising the visible knob alone can leave you refused
+by a limit you cannot see in the file you are editing. The `guard.warmup_new_contacts` body
+names the step that fired, and `GET /_guard/status` reports the ramp in force per session.
+
+Like `maxNewStrangersPerDay`, it counts only conversations this number **started** — see
+below.
+
 To restart a warmup after re-linking a number, delete the session's row or set
 `warmup_started_at` — there is no API for it yet.
 
@@ -107,6 +116,18 @@ The relationship gates. These are the ones that matter.
 `requireHumanTouch` is the single most useful control here and the one most likely to be
 turned off for the wrong reason. It encodes the pattern that actually works: a human makes
 first contact, automation takes over from the reply.
+
+`maxNewStrangersPerDay` counts only chats **this number opened** — a first outbound to
+someone the guard has no earlier inbound from. Replying to a person who messaged you first
+is free, however many of them there are, and however new they are. The two acts have
+opposite risk profiles and the budget exists for one of them; charging both means a good day
+of inbound rations the replies to it while cold outreach carries on.
+
+The test is inbound-before-first-send, deliberately not "does this contact have a human
+touch". `markHumanTouch` and a message typed on the phone both set the touch bit, and under
+`requireHumanTouch` that is how a cold target gets unlocked at all — so keying the budget on
+the touch bit would exempt exactly the sends it exists to cap. A stranger who replies *after*
+you wrote also gets the bit, and that conversation was still yours to start.
 
 ## `groups`
 

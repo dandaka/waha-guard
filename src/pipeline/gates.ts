@@ -103,12 +103,40 @@ export function replyRatioBreached({ policy, store, ctx }: GateInputs): boolean 
   return ratio > policy.replyRatio.maxOutPerIn
 }
 
-function warmupStep(policy: SessionPolicy, session: SessionStateRow, now: number) {
+export function warmupStep(policy: SessionPolicy, session: SessionStateRow, now: number) {
   if (!policy.warmup.enabled || policy.warmup.schedule.length === 0) return null
   const day = Math.floor((now - session.warmup_started_at) / DAY)
   let current = policy.warmup.schedule[0]!
   for (const step of policy.warmup.schedule) if (day >= step.fromDay) current = step
   return current
+}
+
+/**
+ * Is this send us opening a conversation with a stranger — the thing the new-contact
+ * budgets exist to ration?
+ *
+ * Cold-messaging someone off a list and answering someone who just wrote in are opposite
+ * risk profiles, and they used to share one counter: any first outbound to a chat was
+ * charged. So a morning of replies to an ad could spend the day's budget and silence the
+ * next candidate, while genuine cold outreach stayed allowed.
+ *
+ * `in_count` is the half of the `requireHumanTouch` signal that answers *who contacted
+ * whom*. The whole bit does not: `human_touch_at` is also set by a human sending from the
+ * phone and by `markHumanTouch`, which under `requireHumanTouch` is how every permitted
+ * cold send gets unlocked in the first place — keying on it would exempt precisely the
+ * traffic this budget exists to cap. Since no send has gone out yet here, any inbound at
+ * all means they wrote first.
+ *
+ * Both budgets branch here, and `countNewStrangersSince` applies the same rule to the
+ * counter — a gate that exempts a send the counter still charges for only moves the wall.
+ */
+function opensAStranger(inputs: GateInputs): boolean {
+  const { contact } = inputs
+  // A group you were added to is not a stranger you chose to cold-message.
+  if (groupExempt(inputs)) return false
+  // Only a *first ever* send to a chat can open one.
+  if (contact.out_count > 0) return false
+  return contact.in_count === 0
 }
 
 // ---- individual gates -------------------------------------------------------
@@ -172,21 +200,20 @@ function handshake(inputs: GateInputs): GateResult {
 }
 
 function strangerCap(inputs: GateInputs): GateResult {
-  const { policy, store, contact, ctx } = inputs
+  const { policy, store, ctx } = inputs
   const limit = policy.contacts.maxNewStrangersPerDay
   if (!Number.isFinite(limit)) return allow
-  // A group you were added to is not a stranger you chose to cold-message.
-  if (groupExempt(inputs)) return allow
-  // Only a *first ever* send to a chat consumes the new-contact budget.
-  if (contact.out_count > 0) return allow
+  if (!opensAStranger(inputs)) return allow
   const cutoff = ctx.now - DAY
-  if (store.countNewContactsSince(ctx.session, cutoff) < limit) return allow
-  const until = store.newContactSlotFreesAt(ctx.session, cutoff, limit, DAY)
+  if (store.countNewStrangersSince(ctx.session, cutoff) < limit) return allow
+  const until = store.newStrangerSlotFreesAt(ctx.session, cutoff, limit, DAY)
   return {
     kind: 'wait',
     until: until ?? ctx.now + HOUR,
     code: 'guard.new_contact_budget',
-    reason: `new-contact budget of ${limit}/day is spent`,
+    reason:
+      `contacts.maxNewStrangersPerDay of ${limit}/day is spent — that budget counts only ` +
+      `conversations this number started, not replies to people who messaged first`,
   }
 }
 
@@ -206,18 +233,25 @@ function warmupBudget({ policy, store, session, ctx }: GateInputs): GateResult {
 }
 
 function warmupNewContacts(inputs: GateInputs): GateResult {
-  const { policy, store, session, contact, ctx } = inputs
+  const { policy, store, session, ctx } = inputs
   const step = warmupStep(policy, session, ctx.now)
-  if (!step || contact.out_count > 0) return allow
-  if (groupExempt(inputs)) return allow
+  if (!step) return allow
+  if (!opensAStranger(inputs)) return allow
   const cutoff = ctx.now - DAY
-  if (store.countNewContactsSince(ctx.session, cutoff) < step.maxNewContactsPerDay) return allow
-  const until = store.newContactSlotFreesAt(ctx.session, cutoff, step.maxNewContactsPerDay, DAY)
+  if (store.countNewStrangersSince(ctx.session, cutoff) < step.maxNewContactsPerDay) return allow
+  const until = store.newStrangerSlotFreesAt(ctx.session, cutoff, step.maxNewContactsPerDay, DAY)
   return {
     kind: 'wait',
     until: until ?? ctx.now + HOUR,
     code: 'guard.warmup_new_contacts',
-    reason: `warmup new-contact budget of ${step.maxNewContactsPerDay}/day is spent`,
+    // Name the knob. This is a second, independent cap from `maxNewStrangersPerDay`, and a
+    // preset sets it even when policy.yml never mentions `warmup` — so an operator who
+    // raises the visible one and is refused again has no way to guess what just fired.
+    reason:
+      `warmup.schedule[fromDay: ${step.fromDay}].maxNewContactsPerDay of ` +
+      `${step.maxNewContactsPerDay}/day is spent — a separate cap from ` +
+      `contacts.maxNewStrangersPerDay, which the preset supplies when policy.yml omits ` +
+      `warmup (see GET /_guard/status for the ramp in force)`,
   }
 }
 

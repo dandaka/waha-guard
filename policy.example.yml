@@ -45,6 +45,10 @@ rates:
 warmup:
   enabled: true
   # The last step applies indefinitely. Counted from when the guard first saw the session.
+  #
+  # maxNewContactsPerDay is a second, independent cap on top of contacts.maxNewStrangersPerDay
+  # and the lower one wins. The preset sets it even if you delete this block, so leave it
+  # here where you can see it — GET /_guard/status reports whichever ramp is in force.
   schedule:
     - { fromDay: 0, maxPerDay: 20, maxNewContactsPerDay: 5 }
     - { fromDay: 3, maxPerDay: 40, maxNewContactsPerDay: 10 }
@@ -55,6 +59,9 @@ contacts:
   # Refuse to send to anyone a human has never messaged from this number. Make first
   # contact by hand; automation takes over from the reply. This is the gate that matters.
   requireHumanTouch: true
+  # Conversations *this number starts* per rolling day. Replying to someone who messaged
+  # first is free and uncapped — that is the safest traffic there is, and the opposite risk
+  # profile from cold-messaging a stranger. Keep this low; it is the cold-outreach brake.
   maxNewStrangersPerDay: 5
   # How many messages may go to someone who has never replied.
   handshakeMaxMessages: 1

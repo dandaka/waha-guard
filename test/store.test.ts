@@ -110,8 +110,52 @@ describe('sliding windows', () => {
     store.recordGuardOutbound('s', 'a@c.us', 'sendText', 'm1', T0)
     store.recordGuardOutbound('s', 'a@c.us', 'sendText', 'm2', T0 + 1000)
     store.recordGuardOutbound('s', 'b@c.us', 'sendText', 'm3', T0 + 2000)
-    expect(store.countNewContactsSince('s', T0 - DAY)).toBe(2)
-    expect(store.newContactSlotFreesAt('s', T0 - DAY, 2, DAY)).toBe(T0 + DAY)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(2)
+    expect(store.newStrangerSlotFreesAt('s', T0 - DAY, 2, DAY)).toBe(T0 + DAY)
+  })
+
+  test('answering someone who wrote first is not a new stranger', () => {
+    const store = new Store(':memory:')
+    store.recordInbound('s', 'inbound@c.us', 'in1', T0)
+    store.recordGuardOutbound('s', 'inbound@c.us', 'sendText', 'm1', T0 + 1000)
+    store.recordGuardOutbound('s', 'cold@c.us', 'sendText', 'm2', T0 + 2000)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+    // The one cold open is also the one whose slot has to expire.
+    expect(store.newStrangerSlotFreesAt('s', T0 - DAY, 1, DAY)).toBe(T0 + 2000 + DAY)
+  })
+
+  test('a stranger who replies later still spent the budget when we opened', () => {
+    const store = new Store(':memory:')
+    store.recordGuardOutbound('s', 'cold@c.us', 'sendText', 'm1', T0)
+    store.recordInbound('s', 'cold@c.us', 'in1', T0 + 60_000)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+  })
+
+  test('a human typing the first message on the phone is still cold outreach', () => {
+    const store = new Store(':memory:')
+    store.recordHumanOutbound('s', 'cold@c.us', 'm1', T0)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+  })
+
+  test('unlocking a stranger with a human touch does not buy a free cold send', () => {
+    // Under requireHumanTouch this is how every permitted cold send is opened, so exempting
+    // it would leave the budget with nothing left to cap.
+    const store = new Store(':memory:')
+    store.markHumanTouch('s', 'cold@c.us', T0)
+    store.recordGuardOutbound('s', 'cold@c.us', 'sendText', 'm1', T0 + 1000)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+  })
+
+  test('an inbound under a @lid exempts the phone chat once they are linked', () => {
+    const store = new Store(':memory:')
+    store.recordInbound('s', '60851197333718@lid', 'in1', T0)
+    store.recordGuardOutbound('s', '351920266018@c.us', 'sendText', 'm1', T0 + 1000)
+    // Two rows until the link lands — and the send counts, because the guard cannot yet
+    // see that these are one person.
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+
+    store.linkIdentity('s', '60851197333718@lid', '351920266018@c.us', T0 + 2000)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(0)
   })
 
   test('windows are per session', () => {
