@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
 import type { ContactState } from '../policy/schema.ts'
+import { normalizeChatId } from '../waha/identity.ts'
 
 /**
  * Durable guard state.
@@ -11,6 +12,11 @@ import type { ContactState } from '../policy/schema.ts'
  * Sliding-window budgets are computed from the `sends` table (COUNT WHERE sent_at > cutoff),
  * never stored as per-window counters. A stored counter keyed by window is a *fixed* window
  * that resets at the boundary, which lets a caller send 2x the cap across a boundary.
+ *
+ * Every chat id that crosses this boundary is resolved to a single identity first (see
+ * `resolveChatId`). That is deliberately the *only* place it happens: one person arriving as
+ * both `@lid` and `@c.us` must be one contact to every gate, counter and window, and a rule
+ * enforced at one choke point cannot be forgotten at a call site.
  */
 
 export interface ContactRow {
@@ -128,7 +134,37 @@ const MIGRATIONS: string[] = [
      multiplier_set_at  INTEGER,
      stopped_reason     TEXT
    );`,
+  // Alternative spellings of one person: `<lid>@lid` -> `<phone>@c.us`.
+  `CREATE TABLE contact_aliases (
+     session    TEXT NOT NULL,
+     alias      TEXT NOT NULL,
+     chat_id    TEXT NOT NULL,
+     linked_at  INTEGER NOT NULL,
+     PRIMARY KEY (session, alias)
+   );
+   CREATE INDEX contact_aliases_target ON contact_aliases (session, chat_id);`,
 ]
+
+const STATE_RANK: Record<ContactState, number> = {
+  stranger: 0,
+  handshake_sent: 1,
+  known: 2,
+  opted_out: 3,
+}
+
+/** The earlier of two timestamps, ignoring nulls — "when did this start". */
+function earliest(a: number | null, b: number | null): number | null {
+  if (a === null) return b
+  if (b === null) return a
+  return Math.min(a, b)
+}
+
+/** The later of two timestamps, ignoring nulls — "when did this last happen". */
+function latest(a: number | null, b: number | null): number | null {
+  if (a === null) return b
+  if (b === null) return a
+  return Math.max(a, b)
+}
 
 export class Store {
   readonly db: Database
@@ -156,16 +192,126 @@ export class Store {
     this.db.close()
   }
 
+  // ---- identity -----------------------------------------------------------
+
+  /**
+   * The identity a chat id belongs to: folded to one spelling, then followed through any
+   * LID link the guard has learned. Every contact-keyed method below starts here, so a
+   * reply that arrives as `@lid` and a send addressed to `@c.us` reach the same row.
+   *
+   * An unresolved `@lid` returns itself. That is the honest answer — the person is real and
+   * their messages must still be recorded — and `linkIdentity` folds those rows in later.
+   */
+  resolveChatId(session: string, chatId: string): string {
+    const normalized = normalizeChatId(chatId)
+    const row = this.db
+      .query('SELECT chat_id FROM contact_aliases WHERE session = ? AND alias = ?')
+      .get(session, normalized) as { chat_id: string } | null
+    return row?.chat_id ?? normalized
+  }
+
+  /**
+   * Learn that `alias` is another name for `chatId`, and fold everything already recorded
+   * under the alias into it.
+   *
+   * The fold is what makes late resolution safe: a reply booked against a bare `@lid` before
+   * the phone was known still ends up credited to the contact, so the handshake clears
+   * retroactively rather than staying stuck on a technicality.
+   *
+   * Returns false when the link was already known.
+   */
+  linkIdentity(session: string, alias: string, chatId: string, now: number): boolean {
+    const from = normalizeChatId(alias)
+    const into = this.resolveChatId(session, chatId)
+    if (from === into) return false
+    return this.db.transaction(() => {
+      const existing = this.db
+        .query('SELECT chat_id FROM contact_aliases WHERE session = ? AND alias = ?')
+        .get(session, from) as { chat_id: string } | null
+      if (existing?.chat_id === into) return false
+
+      this.db
+        .query(
+          `INSERT INTO contact_aliases (session, alias, chat_id, linked_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (session, alias)
+           DO UPDATE SET chat_id = excluded.chat_id, linked_at = excluded.linked_at`,
+        )
+        .run(session, from, into, now)
+      // Anything that pointed at the alias now points past it: aliases never chain, so
+      // resolution stays a single lookup and cannot loop.
+      this.db
+        .query('UPDATE contact_aliases SET chat_id = ? WHERE session = ? AND chat_id = ?')
+        .run(into, session, from)
+
+      this.mergeContact(session, from, into)
+      for (const table of ['sends', 'inbound', 'queued']) {
+        this.db
+          .query(`UPDATE ${table} SET chat_id = ? WHERE session = ? AND chat_id = ?`)
+          .run(into, session, from)
+      }
+      return true
+    })()
+  }
+
+  /** Every spelling the guard knows for this contact, the canonical one first. */
+  aliasesOf(session: string, chatId: string): string[] {
+    const canonical = this.resolveChatId(session, chatId)
+    const rows = this.db
+      .query('SELECT alias FROM contact_aliases WHERE session = ? AND chat_id = ? ORDER BY alias')
+      .all(session, canonical) as { alias: string }[]
+    return [canonical, ...rows.map((r) => r.alias)]
+  }
+
+  /**
+   * Combine two contact rows into one. Counters add, timestamps take the outer bound, and
+   * state takes the stronger of the two — a relationship learned under either name is still
+   * a relationship, and an opt-out recorded under either name still silences both.
+   */
+  private mergeContact(session: string, from: string, into: string): void {
+    const src = this.db
+      .query('SELECT * FROM contacts WHERE session = ? AND chat_id = ?')
+      .get(session, from) as ContactRow | null
+    if (!src) return
+    this.db.query('DELETE FROM contacts WHERE session = ? AND chat_id = ?').run(session, from)
+
+    const dst = this.insertContact(session, into, src.first_seen)
+    const state = STATE_RANK[src.state] > STATE_RANK[dst.state] ? src.state : dst.state
+    this.db
+      .query(
+        `UPDATE contacts
+         SET state = ?, first_seen = ?, last_out_at = ?, last_in_at = ?, human_touch_at = ?,
+             out_count = ?, in_count = ?, opted_out_at = ?
+         WHERE session = ? AND chat_id = ?`,
+      )
+      .run(
+        state,
+        Math.min(src.first_seen, dst.first_seen),
+        latest(src.last_out_at, dst.last_out_at),
+        latest(src.last_in_at, dst.last_in_at),
+        earliest(src.human_touch_at, dst.human_touch_at),
+        src.out_count + dst.out_count,
+        src.in_count + dst.in_count,
+        state === 'opted_out' ? earliest(src.opted_out_at, dst.opted_out_at) : null,
+        session,
+        into,
+      )
+  }
+
   // ---- contacts -----------------------------------------------------------
 
   getContact(session: string, chatId: string): ContactRow | null {
     return this.db
       .query('SELECT * FROM contacts WHERE session = ? AND chat_id = ?')
-      .get(session, chatId) as ContactRow | null
+      .get(session, this.resolveChatId(session, chatId)) as ContactRow | null
   }
 
   /** Insert-if-absent, then return the row. Never overwrites an existing state. */
   ensureContact(session: string, chatId: string, now: number): ContactRow {
+    return this.insertContact(session, this.resolveChatId(session, chatId), now)
+  }
+
+  /** `ensureContact` on an id that is already resolved — the merge path must not re-resolve. */
+  private insertContact(session: string, chatId: string, now: number): ContactRow {
     this.db
       .query(
         `INSERT INTO contacts (session, chat_id, state, first_seen)
@@ -173,7 +319,9 @@ export class Store {
          ON CONFLICT (session, chat_id) DO NOTHING`,
       )
       .run(session, chatId, now)
-    return this.getContact(session, chatId)!
+    return this.db
+      .query('SELECT * FROM contacts WHERE session = ? AND chat_id = ?')
+      .get(session, chatId) as ContactRow
   }
 
   /**
@@ -181,18 +329,13 @@ export class Store {
    * regress to `stranger` because we sent again. `opted_out` is terminal until cleared.
    */
   promoteContact(session: string, chatId: string, to: ContactState, now: number): void {
-    const rank: Record<ContactState, number> = {
-      stranger: 0,
-      handshake_sent: 1,
-      known: 2,
-      opted_out: 3,
-    }
-    const current = this.ensureContact(session, chatId, now)
+    const id = this.resolveChatId(session, chatId)
+    const current = this.insertContact(session, id, now)
     if (current.state === 'opted_out' && to !== 'opted_out') return
-    if (rank[to] <= rank[current.state]) return
+    if (STATE_RANK[to] <= STATE_RANK[current.state]) return
     this.db
       .query('UPDATE contacts SET state = ? WHERE session = ? AND chat_id = ?')
-      .run(to, session, chatId)
+      .run(to, session, id)
   }
 
   /**
@@ -213,23 +356,25 @@ export class Store {
    */
   markHumanTouch(session: string, chatId: string, now: number, touchedAt?: number): boolean {
     return this.db.transaction(() => {
-      const existing = this.ensureContact(session, chatId, now)
+      const id = this.resolveChatId(session, chatId)
+      const existing = this.insertContact(session, id, now)
       if (existing.human_touch_at !== null) return false
       this.db
         .query('UPDATE contacts SET human_touch_at = ? WHERE session = ? AND chat_id = ?')
-        .run(touchedAt ?? now, session, chatId)
-      this.promoteContact(session, chatId, 'known', now)
+        .run(touchedAt ?? now, session, id)
+      this.promoteContact(session, id, 'known', now)
       return true
     })()
   }
 
   markOptOut(session: string, chatId: string, now: number): void {
-    this.ensureContact(session, chatId, now)
+    const id = this.resolveChatId(session, chatId)
+    this.insertContact(session, id, now)
     this.db
       .query(
         "UPDATE contacts SET state = 'opted_out', opted_out_at = ? WHERE session = ? AND chat_id = ?",
       )
-      .run(now, session, chatId)
+      .run(now, session, id)
   }
 
   clearOptOut(session: string, chatId: string): void {
@@ -239,17 +384,18 @@ export class Store {
                              opted_out_at = NULL
          WHERE session = ? AND chat_id = ? AND state = 'opted_out'`,
       )
-      .run(session, chatId)
+      .run(session, this.resolveChatId(session, chatId))
   }
 
   /** Returns false if this message id was already recorded — webhooks get redelivered. */
   recordInbound(session: string, chatId: string, msgId: string | null, now: number): boolean {
     return this.db.transaction(() => {
+      const id = this.resolveChatId(session, chatId)
       const res = this.db
         .query('INSERT OR IGNORE INTO inbound (session, chat_id, msg_id, at) VALUES (?, ?, ?, ?)')
-        .run(session, chatId, msgId, now)
+        .run(session, id, msgId, now)
       if (res.changes === 0) return false
-      this.ensureContact(session, chatId, now)
+      this.insertContact(session, id, now)
       this.db
         .query(
           `UPDATE contacts
@@ -258,8 +404,8 @@ export class Store {
                human_touch_at = COALESCE(human_touch_at, ?)
            WHERE session = ? AND chat_id = ?`,
         )
-        .run(now, now, session, chatId)
-      this.promoteContact(session, chatId, 'known', now)
+        .run(now, now, session, id)
+      this.promoteContact(session, id, 'known', now)
       return true
     })()
   }
@@ -272,21 +418,22 @@ export class Store {
   recordHumanOutbound(session: string, chatId: string, msgId: string | null, now: number): boolean {
     return this.db.transaction(() => {
       if (msgId && this.hasSend(msgId)) return false
-      this.ensureContact(session, chatId, now)
+      const id = this.resolveChatId(session, chatId)
+      this.insertContact(session, id, now)
       this.db
         .query(
           `UPDATE contacts
            SET human_touch_at = COALESCE(human_touch_at, ?), last_out_at = ?, out_count = out_count + 1
            WHERE session = ? AND chat_id = ?`,
         )
-        .run(now, now, session, chatId)
-      this.promoteContact(session, chatId, 'known', now)
+        .run(now, now, session, id)
+      this.promoteContact(session, id, 'known', now)
       this.db
         .query(
           `INSERT INTO sends (session, chat_id, msg_id, sent_at, route, origin)
            VALUES (?, ?, ?, ?, 'human', 'human')`,
         )
-        .run(session, chatId, msgId, now)
+        .run(session, id, msgId, now)
       return true
     })()
   }
@@ -299,19 +446,20 @@ export class Store {
     now: number,
   ): number {
     return this.db.transaction(() => {
-      this.ensureContact(session, chatId, now)
+      const id = this.resolveChatId(session, chatId)
+      this.insertContact(session, id, now)
       this.db
         .query(
           `UPDATE contacts SET out_count = out_count + 1, last_out_at = ? WHERE session = ? AND chat_id = ?`,
         )
-        .run(now, session, chatId)
-      this.promoteContact(session, chatId, 'handshake_sent', now)
+        .run(now, session, id)
+      this.promoteContact(session, id, 'handshake_sent', now)
       const res = this.db
         .query(
           `INSERT INTO sends (session, chat_id, msg_id, sent_at, route, origin)
            VALUES (?, ?, ?, ?, ?, 'guard')`,
         )
-        .run(session, chatId, msgId, now, route)
+        .run(session, id, msgId, now, route)
       return Number(res.lastInsertRowid)
     })()
   }
@@ -365,7 +513,7 @@ export class Store {
            WHERE session = ? AND chat_id = ? AND msg_id IS NULL AND origin = 'guard' AND sent_at > ?
            LIMIT 1`,
         )
-        .get(session, chatId, since) !== null
+        .get(session, this.resolveChatId(session, chatId), since) !== null
     )
   }
 
@@ -531,7 +679,7 @@ export class Store {
       .run(
         row.guard_id,
         row.session,
-        row.chat_id,
+        this.resolveChatId(row.session, row.chat_id),
         row.route,
         row.method,
         row.path,

@@ -117,6 +117,7 @@ export function testConfig(overrides: Partial<GuardConfig> = {}): GuardConfig {
     webhookTimeoutMs: 5_000,
     logLevel: 'error',
     apiKey: null,
+    upstreamApiKey: null,
     ...overrides,
   }
 }

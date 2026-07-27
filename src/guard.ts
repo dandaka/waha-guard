@@ -77,6 +77,7 @@ export class Guard {
       log: this.log,
       metrics: this.metrics,
       echoConfirmMs: options.echoConfirmMs,
+      resolveLid: (session, lid) => this.resolveLid(session, lid),
     })
     this.worker = new QueueWorker({
       store: this.store,
@@ -98,6 +99,24 @@ export class Guard {
     await this.worker.stop()
     this.observer.close()
     this.store.close()
+  }
+
+  /**
+   * Ask WAHA which phone is behind a LID. Returns null on anything unhelpful — a failed
+   * lookup leaves the contact recorded under its LID, which the next resolution folds in.
+   */
+  private async resolveLid(session: string, lid: string): Promise<string | null> {
+    // Both parts land in a URL path and the lid arrives from a webhook payload, so only the
+    // shape WhatsApp actually issues is allowed through — percent-encoding it instead would
+    // change the path WAHA matches on.
+    if (!/^\d+@lid$/i.test(lid) || !/^[\w.-]+$/.test(session)) return null
+    const headers = new Headers()
+    const key = this.options.config.upstreamApiKey
+    if (key) headers.set('x-api-key', key)
+    const result = await this.upstream
+      .getJson<{ pn?: unknown }>(`/api/${session}/lids/${lid}`, headers)
+      .catch(() => null)
+    return typeof result?.pn === 'string' && result.pn.length > 0 ? result.pn : null
   }
 
   private registerGauges(): void {
@@ -371,8 +390,10 @@ export class Guard {
       if (!chatId)
         return this.guardError(400, 'guard.bad_request', 'chatId query parameter is required')
       const contact = this.store.getContact(session, chatId)
+      // `aliases` answers the question this endpoint is usually opened to settle: which
+      // ids the guard believes are this one person.
       return contact
-        ? Response.json(contact)
+        ? Response.json({ ...contact, aliases: this.store.aliasesOf(session, chatId) })
         : this.guardError(404, 'guard.unknown_contact', 'no state recorded for this contact')
     }
 
@@ -430,6 +451,37 @@ export class Guard {
         already: already.length,
       })
       return Response.json({ guard: true, session, marked, already })
+    }
+
+    /**
+     * Tell the guard that two ids are one person.
+     *
+     * The observer learns this by itself from any message it sees, but only from a message it
+     * sees. A thread that was already stuck when the guard learned to resolve LIDs has its
+     * reply booked under a `@lid` and its sends counted under the phone, and nothing merges
+     * them until the contact writes in again — which is precisely what the stuck handshake is
+     * preventing us from asking them to do. This is the way out of that.
+     */
+    if (req.method === 'POST' && path === '/_guard/contact/link') {
+      const body = (await req.json().catch(() => null)) as {
+        session?: string
+        alias?: string
+        chatId?: string
+      } | null
+      const session = body?.session ?? 'default'
+      const { alias, chatId } = body ?? {}
+      if (!alias || !chatId) {
+        return this.guardError(400, 'guard.bad_request', 'alias and chatId are both required')
+      }
+      const linked = this.store.linkIdentity(session, alias, chatId, this.clock.now())
+      if (linked) this.log.info('identities linked by hand', { session, alias, chatId })
+      return Response.json({
+        guard: true,
+        session,
+        linked,
+        contact: this.store.getContact(session, chatId),
+        aliases: this.store.aliasesOf(session, chatId),
+      })
     }
 
     if (req.method === 'POST' && path === '/_guard/resume') {

@@ -48,6 +48,23 @@ export interface ObservedMessage {
   fromMe: boolean
   body: string
   ids: string[]
+  /**
+   * The counterpart's phone JID, when the engine sent one alongside an anonymous LID.
+   * This is what lets the guard put a `@lid` reply and a `@c.us` send on one contact
+   * without a round trip.
+   */
+  altJid: string | null
+}
+
+/**
+ * GOWS carries the counterpart's phone JID next to the LID — `SenderAlt` on a message from
+ * them, `RecipientAlt` on one from us — as e.g. `351912973590@s.whatsapp.net`.
+ */
+function altJidFromPayload(p: Record<string, unknown>, fromMe: boolean): string | null {
+  const info = asRecord(asRecord(p._data)?.Info)
+  if (!info) return null
+  const alt = fromMe ? info.RecipientAlt : info.SenderAlt
+  return typeof alt === 'string' && alt.length > 0 ? alt : null
 }
 
 export function observeMessage(payload: unknown): ObservedMessage | null {
@@ -64,7 +81,13 @@ export function observeMessage(payload: unknown): ObservedMessage | null {
     (typeof p.caption === 'string' && p.caption) ||
     (typeof p.text === 'string' && p.text) ||
     ''
-  return { chatId: chatId || null, fromMe, body, ids: messageIdCandidates(p) }
+  return {
+    chatId: chatId || null,
+    fromMe,
+    body,
+    ids: messageIdCandidates(p),
+    altJid: altJidFromPayload(p, fromMe),
+  }
 }
 
 /** WAHA ack levels; `ackName` is the string form on some engines. */

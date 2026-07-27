@@ -90,6 +90,20 @@ export class Upstream {
     })
   }
 
+  /**
+   * GET a JSON path on the upstream, for the guard's own lookups. Null on anything that is
+   * not a readable 2xx body — a caller of this is enriching what it already has, so a
+   * missing answer must degrade rather than fail the request that triggered it.
+   */
+  async getJson<T>(path: string, headers?: Headers): Promise<T | null> {
+    const res = await this.raw(new URL(path, this.options.base).toString(), {
+      method: 'GET',
+      headers: new Headers(headers ?? {}),
+    })
+    if (!res.ok) return null
+    return (await res.json().catch(() => null)) as T | null
+  }
+
   /** POST a JSON body to an upstream path, used by the guard's own presence calls. */
   async postJson(path: string, body: unknown, headers?: Headers): Promise<Response> {
     const out = new Headers(headers ?? {})

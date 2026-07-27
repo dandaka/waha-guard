@@ -15,6 +15,13 @@ export interface GuardConfig {
   logLevel: LogLevel
   /** When set, /_guard endpoints (except /_guard/health) require this key in x-api-key. */
   apiKey: string | null
+  /**
+   * WAHA's own API key, for the few calls the guard makes on its own behalf rather than on
+   * a caller's (resolving a LID to a phone). Proxied traffic carries the caller's key and
+   * does not need this. Unset is fine — LID resolution simply falls back to the alt JID that
+   * inbound payloads already carry.
+   */
+  upstreamApiKey: string | null
 }
 
 export class ConfigError extends Error {}
@@ -72,6 +79,7 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     webhookTimeoutMs: num('GUARD_WEBHOOK_TIMEOUT_MS', 15_000, env),
     logLevel: logLevel as LogLevel,
     apiKey: env.GUARD_API_KEY || null,
+    upstreamApiKey: env.GUARD_UPSTREAM_API_KEY || null,
   }
 }
 

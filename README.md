@@ -102,6 +102,7 @@ WAHA directly.
 | `GUARD_PORT` / `GUARD_HOST` | `3000` / `0.0.0.0` | Listen address |
 | `GUARD_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `GUARD_API_KEY` | — | When set, `/_guard/*` endpoints (except `/_guard/health`) require this value in the `x-api-key` header. Set it whenever the guard is reachable beyond localhost. |
+| `GUARD_UPSTREAM_API_KEY` | — | WAHA's own API key, used only for the guard's own lookups (resolving a LID to a phone). Proxied traffic carries the caller's key. Unset is fine — see [Who is who](#who-is-who). |
 
 ## Transparent by default
 
@@ -222,6 +223,38 @@ not have one — `requireHumanTouch` on a group you own is a refusal to post to 
 announcement channel. They still count against the rate windows, quiet hours and pacing,
 since they consume the same real quota. See `groups.mode` for `contact` and `block`.
 
+### Who is who
+
+One person reaches the guard under more than one name. WhatsApp's GOWS engine reports inbound
+senders as an anonymous LID (`60851197333718@lid`) while sends are addressed to the phone
+(`351920266018@c.us`), and either may arrive carrying a `:device` suffix or the
+`@s.whatsapp.net` domain. A contact graph that keys on the raw string sees two strangers where
+there is one relationship — and a handshake counter that can never see a reply, so every
+conversation goes mute after one message.
+
+So every chat id is folded to one identity before anything is recorded against it:
+
+1. spellings of the same phone collapse (`351920266018:12@s.whatsapp.net` → `351920266018@c.us`);
+2. a LID is matched to its phone from the alt JID the inbound payload already carries
+   (`_data.Info.SenderAlt`), with no round trip;
+3. failing that, the guard asks WAHA's `/lids` endpoint in the background.
+
+A LID that resolves to nothing is still recorded under its own name — the person is real and
+their messages must count — and folds into the phone's row the moment either route resolves,
+which credits the earlier replies retroactively. **What goes on the wire is never rewritten:**
+WhatsApp is addressed with exactly the id the caller asked for. Only the bookkeeping is
+canonical.
+
+The observer learns all of this from messages it sees — which is no help to a thread that was
+*already* stuck when the guard was upgraded, because merging its rows needs a new inbound
+message and the stuck handshake is what stops you asking for one. Break that deadlock by hand:
+
+```bash
+curl -X POST localhost:3010/_guard/contact/link \
+  -H 'content-type: application/json' \
+  -d '{"session":"default","alias":"60851197333718@lid","chatId":"351920266018@c.us"}'
+```
+
 Opt-out keywords are matched against the whole normalized message, not as a substring, so
 "can you stop by tomorrow?" is not an opt-out. They are not matched in groups at all, where
 any one participant could otherwise mute the channel for everyone. A human replying by hand from the phone
@@ -275,10 +308,11 @@ All namespaced under `/_guard/` so they cannot shadow a WAHA route.
 | `GET /_guard/status` | per-session warmup day, degraded state, queue depth |
 | `GET /_guard/metrics` | Prometheus |
 | `GET /_guard/policy?session=` | the effective resolved policy |
-| `GET /_guard/contact?session=&chatId=` | what the guard knows about a contact |
+| `GET /_guard/contact?session=&chatId=` | what the guard knows about a contact, and every id it believes is that person |
 | `GET /_guard/queue/{guardId}` | status of a queued send |
 | `POST /_guard/opt-out` · `/_guard/opt-in` | manual opt-out management |
 | `POST /_guard/contact/human-touch` | record that a human already spoke to a contact (`chatId` or `chatIds`) |
+| `POST /_guard/contact/link` | declare that `alias` and `chatId` are one person, merging what was recorded under each |
 | `POST /_guard/resume` | clear a stopped session after you have checked it |
 
 ## Status
