@@ -526,9 +526,22 @@ export class Store {
 
   // ---- windows ------------------------------------------------------------
 
-  countSendsSince(session: string, since: number): number {
+  /** The group/channel predicate `coldOpens` uses, so both counters draw the same line. */
+  private static notAGroup(column: string): string {
+    return `AND ${column} NOT LIKE '%@g.us' AND ${column} NOT LIKE '%@newsletter'`
+  }
+
+  /**
+   * `excludeGroups` is for the counters that ration *conversations with people*. The rate
+   * windows leave it false: they cap what the number puts on the wire, and a job post to a
+   * community group is on the wire like anything else.
+   */
+  countSendsSince(session: string, since: number, excludeGroups = false): number {
     const row = this.db
-      .query('SELECT COUNT(*) AS n FROM sends WHERE session = ? AND sent_at > ?')
+      .query(
+        `SELECT COUNT(*) AS n FROM sends WHERE session = ? AND sent_at > ?
+         ${excludeGroups ? Store.notAGroup('chat_id') : ''}`,
+      )
       .get(session, since) as { n: number }
     return row.n
   }
@@ -540,12 +553,19 @@ export class Store {
    * With `limit` sends allowed, the (limit)-th newest send in the window is the one whose
    * expiry frees capacity — so order descending and skip limit-1.
    */
-  slotFreesAt(session: string, since: number, limit: number, windowMs: number): number | null {
+  slotFreesAt(
+    session: string,
+    since: number,
+    limit: number,
+    windowMs: number,
+    excludeGroups = false,
+  ): number | null {
     if (!Number.isFinite(limit)) return null
     const row = this.db
       .query(
         `SELECT sent_at FROM sends
          WHERE session = ? AND sent_at > ?
+         ${excludeGroups ? Store.notAGroup('chat_id') : ''}
          ORDER BY sent_at DESC
          LIMIT 1 OFFSET ?`,
       )
@@ -590,7 +610,7 @@ export class Store {
       SELECT chat_id, MIN(sent_at) AS first_send FROM sends WHERE session = ?1 GROUP BY chat_id
     ) AS f
     WHERE f.first_send > ?2
-      ${excludeGroups ? "AND f.chat_id NOT LIKE '%@g.us' AND f.chat_id NOT LIKE '%@newsletter'" : ''}
+      ${excludeGroups ? Store.notAGroup('f.chat_id') : ''}
       AND NOT EXISTS (
         SELECT 1 FROM inbound i
         WHERE i.session = ?1 AND i.chat_id = f.chat_id AND i.at <= f.first_send

@@ -238,13 +238,25 @@ function strangerCap(inputs: GateInputs): GateResult {
   }
 }
 
+/**
+ * The warmup ramp teaches a young number to talk to *people* at a human volume, and
+ * `groups.mode: exempt` says a community group is not one of those conversations — the same
+ * reasoning `countsNewStrangers` already applies to the new-contact half of the ramp.
+ *
+ * Counting group posts here spent the ramp on traffic the ramp would never have refused: on
+ * 2026-07-27 a morning of job posts to community groups took the whole day-0 budget of 20
+ * before noon, and the chase to the one employer we had a live mandate with was refused with
+ * `guard.warmup_budget`. `rates.perDay` still counts every send, groups included, so the
+ * number keeps a hard ceiling on what it puts on the wire.
+ */
 function warmupBudget({ policy, store, session, ctx }: GateInputs): GateResult {
   const step = warmupStep(policy, session, ctx.now)
   if (!step) return allow
+  const excludeGroups = policy.groups.mode === 'exempt'
   const cutoff = ctx.now - DAY
-  const sent = store.countSendsSince(ctx.session, cutoff)
+  const sent = store.countSendsSince(ctx.session, cutoff, excludeGroups)
   if (sent < step.maxPerDay) return allow
-  const until = store.slotFreesAt(ctx.session, cutoff, step.maxPerDay, DAY)
+  const until = store.slotFreesAt(ctx.session, cutoff, step.maxPerDay, DAY, excludeGroups)
   return {
     kind: 'wait',
     until: until ?? ctx.now + HOUR,

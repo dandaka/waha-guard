@@ -187,6 +187,36 @@ describe('inbound does not consume the cold-outreach budget', () => {
     expect(harness.store.countSendsSince('default', 0)).toBe(11)
   })
 
+  test('a day of group job posts leaves the warmup day budget for people too', async () => {
+    // The sibling of the case above, on the ramp's *total* counter rather than its
+    // new-contact one. On 2026-07-27 the morning's job posts spent the day-0 budget of 20
+    // before noon and the chase to a live employer came back `guard.warmup_budget`.
+    harness = await budgetHarness({
+      warmup: { enabled: true, schedule: [{ fromDay: 0, maxPerDay: 3, maxNewContactsPerDay: 50 }] },
+    })
+    for (let i = 0; i < 5; i++) {
+      expect((await sendText(`12036340974053052${i}@g.us`, 'vaga')).status).toBe(200)
+    }
+
+    await touch(PHONE)
+    expect((await sendText(PHONE, 'olá')).status).toBe(200)
+  })
+
+  test('the warmup day budget still stops a day of messages to people', async () => {
+    harness = await budgetHarness({
+      warmup: { enabled: true, schedule: [{ fromDay: 0, maxPerDay: 2, maxNewContactsPerDay: 50 }] },
+    })
+    for (const chatId of ['351944444441@c.us', '351944444442@c.us']) {
+      await touch(chatId)
+      expect((await sendText(chatId)).status).toBe(200)
+    }
+
+    await touch('351944444443@c.us')
+    const blocked = await sendText('351944444443@c.us')
+    expect(blocked.status).toBe(429)
+    expect(blocked.headers.get('x-guard-reason')).toBe('guard.warmup_budget')
+  })
+
   test('GET /_guard/status shows both caps and what is spent', async () => {
     harness = await budgetHarness()
     await touch(PHONE)

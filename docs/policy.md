@@ -124,8 +124,11 @@ opposite risk profiles and the budget exists for one of them; charging both mean
 of inbound rations the replies to it while cold outreach carries on.
 
 Group and channel chats are outside it too under `groups.mode: exempt`, for the same reason
-they are outside the gates: there is no individual on the other end to be a stranger. They
-still count against the rate windows and the warmup `maxPerDay`, which are about volume.
+they are outside the gates: there is no individual on the other end to be a stranger. The
+warmup ramp's `maxPerDay` skips them as well — the ramp paces conversations with people, and
+a morning of job posts to community groups used to spend a whole day-0 budget of 20 before
+anyone wrote in. They do still count against the rate windows, which cap what the number puts
+on the wire whoever it is talking to.
 
 The test is inbound-before-first-send, deliberately not "does this contact have a human
 touch". `markHumanTouch` and a message typed on the phone both set the touch bit, and under
