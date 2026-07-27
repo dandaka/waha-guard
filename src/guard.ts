@@ -1,7 +1,7 @@
 import type { GuardConfig } from './config.ts'
 import { createLogger, type Logger } from './observability/log.ts'
 import { Metrics } from './observability/metrics.ts'
-import { warmupStep } from './pipeline/gates.ts'
+import { countsNewStrangers, warmupStep } from './pipeline/gates.ts'
 import { Sender } from './pipeline/sender.ts'
 import { forSession } from './policy/load.ts'
 import type { Policy } from './policy/schema.ts'
@@ -371,7 +371,7 @@ export class Guard {
         sessions: this.store.listSessions().map((s) => {
           const policy = forSession(this.policy, s.session)
           const step = warmupStep(policy, s, now)
-          const cutoff = now - 86_400_000
+          const budget = countsNewStrangers(policy, this.store, s.session, now)
           return {
             session: s.session,
             stopped: s.stopped_reason,
@@ -382,7 +382,7 @@ export class Guard {
             // operator reading the mounted file cannot see which caps are actually in force
             // — and two independent new-contact caps means the lower one wins silently.
             newContactCaps: {
-              spentToday: this.store.countNewStrangersSince(s.session, cutoff),
+              spentToday: budget.spent,
               maxNewStrangersPerDay: policy.contacts.maxNewStrangersPerDay,
               warmupMaxNewContactsPerDay: step?.maxNewContactsPerDay ?? null,
               warmupMaxPerDay: step?.maxPerDay ?? null,

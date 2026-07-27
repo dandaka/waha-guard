@@ -230,6 +230,11 @@ counter means a morning of replies can silence the afternoon's. The exemption fo
 identity fold below, so a reply that arrived as `@lid` exempts the `@c.us` chat you answer
 on.
 
+Group and channel chats do not spend it either, when `groups.mode` is `exempt`. The gates
+already skip them, and a counter that charges what the gate would never refuse just spends
+the budget somewhere it was not protecting — a day of job posts to community groups reading
+as twenty strangers cold-messaged, and the next real person refused.
+
 A human touch does **not** waive the budget. `POST /_guard/contact/human-touch` and a message
 typed on the phone both satisfy `requireHumanTouch`, and under that gate they are how every
 permitted cold send is unlocked in the first place — waiving the budget for them would leave

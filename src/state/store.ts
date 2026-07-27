@@ -578,19 +578,28 @@ export class Store {
    *
    * `inbound.chat_id` is resolved and folded by `linkIdentity`, so a reply that arrived
    * under a `@lid` exempts the `@c.us` chat once the two are known to be one person.
+   *
+   * `excludeGroups` follows `groups.mode: exempt`: a group chat has no individual on the
+   * other end to be a stranger, and the gates already skip it. The counter has to skip it
+   * too — a day of job posts to community groups is not twenty strangers cold-messaged, and
+   * counting them spent the whole budget on chats the budget would never have refused.
    */
-  private static readonly COLD_OPENS = `
+  private static coldOpens(excludeGroups: boolean): string {
+    return `
     SELECT f.chat_id, f.first_send FROM (
       SELECT chat_id, MIN(sent_at) AS first_send FROM sends WHERE session = ?1 GROUP BY chat_id
     ) AS f
-    WHERE f.first_send > ?2 AND NOT EXISTS (
-      SELECT 1 FROM inbound i
-      WHERE i.session = ?1 AND i.chat_id = f.chat_id AND i.at <= f.first_send
-    )`
+    WHERE f.first_send > ?2
+      ${excludeGroups ? "AND f.chat_id NOT LIKE '%@g.us' AND f.chat_id NOT LIKE '%@newsletter'" : ''}
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound i
+        WHERE i.session = ?1 AND i.chat_id = f.chat_id AND i.at <= f.first_send
+      )`
+  }
 
-  countNewStrangersSince(session: string, cutoff: number): number {
+  countNewStrangersSince(session: string, cutoff: number, excludeGroups = true): number {
     const row = this.db
-      .query(`SELECT COUNT(*) AS n FROM (${Store.COLD_OPENS})`)
+      .query(`SELECT COUNT(*) AS n FROM (${Store.coldOpens(excludeGroups)})`)
       .get(session, cutoff) as { n: number }
     return row.n
   }
@@ -601,11 +610,12 @@ export class Store {
     cutoff: number,
     limit: number,
     windowMs: number,
+    excludeGroups = true,
   ): number | null {
     if (!Number.isFinite(limit)) return null
     const row = this.db
       .query(
-        `SELECT first_send FROM (${Store.COLD_OPENS})
+        `SELECT first_send FROM (${Store.coldOpens(excludeGroups)})
          ORDER BY first_send DESC
          LIMIT 1 OFFSET ?3`,
       )

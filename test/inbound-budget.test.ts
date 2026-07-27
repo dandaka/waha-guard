@@ -171,6 +171,22 @@ describe('inbound does not consume the cold-outreach budget', () => {
     expect((await sendText('351999999999@c.us')).status).toBe(429)
   })
 
+  test('a day of group job posts leaves the budget for people', async () => {
+    // Groups are exempt from the contact gates, so a group send is never *refused* by this
+    // budget — but every one of them used to spend a slot a real person then could not have.
+    harness = await budgetHarness()
+    // Twice the 5/day cap, and none of it is cold outreach to a person.
+    for (let i = 0; i < 10; i++) {
+      expect((await sendText(`12036340974053052${i}@g.us`, 'vaga')).status).toBe(200)
+    }
+    expect(spentToday()).toBe(0)
+
+    await touch(PHONE)
+    expect((await sendText(PHONE)).status).toBe(200)
+    // They do still consume the shared per-day send quota, which is a different budget.
+    expect(harness.store.countSendsSince('default', 0)).toBe(11)
+  })
+
   test('GET /_guard/status shows both caps and what is spent', async () => {
     harness = await budgetHarness()
     await touch(PHONE)

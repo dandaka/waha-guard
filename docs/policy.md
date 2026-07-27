@@ -123,6 +123,10 @@ is free, however many of them there are, and however new they are. The two acts 
 opposite risk profiles and the budget exists for one of them; charging both means a good day
 of inbound rations the replies to it while cold outreach carries on.
 
+Group and channel chats are outside it too under `groups.mode: exempt`, for the same reason
+they are outside the gates: there is no individual on the other end to be a stranger. They
+still count against the rate windows and the warmup `maxPerDay`, which are about volume.
+
 The test is inbound-before-first-send, deliberately not "does this contact have a human
 touch". `markHumanTouch` and a message typed on the phone both set the touch bit, and under
 `requireHumanTouch` that is how a cold target gets unlocked at all — so keying the budget on

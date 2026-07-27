@@ -137,6 +137,16 @@ describe('sliding windows', () => {
     expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
   })
 
+  test('group posts do not spend the budget the gates never charge them against', () => {
+    const store = new Store(':memory:')
+    store.recordGuardOutbound('s', '120363409740530524@g.us', 'sendText', 'm1', T0)
+    store.recordGuardOutbound('s', '120363408782036358@g.us', 'sendText', 'm2', T0 + 1000)
+    store.recordGuardOutbound('s', 'cold@c.us', 'sendText', 'm3', T0 + 2000)
+    expect(store.countNewStrangersSince('s', T0 - DAY)).toBe(1)
+    // ...unless the policy treats groups as contacts, which is what the flag is for.
+    expect(store.countNewStrangersSince('s', T0 - DAY, false)).toBe(3)
+  })
+
   test('unlocking a stranger with a human touch does not buy a free cold send', () => {
     // Under requireHumanTouch this is how every permitted cold send is opened, so exempting
     // it would leave the budget with nothing left to cap.

@@ -199,14 +199,35 @@ function handshake(inputs: GateInputs): GateResult {
   }
 }
 
+/**
+ * Groups are outside the contact gates when `groups.mode` is `exempt`, so they are outside
+ * the counter too. A gate that never refuses a group send while the counter charges every
+ * one of them just spends the whole budget on chats it was not protecting: 20 job posts to
+ * community groups read as 20 strangers cold-messaged, and the next real person is refused.
+ */
+export function countsNewStrangers(
+  policy: SessionPolicy,
+  store: Store,
+  session: string,
+  now: number,
+) {
+  const excludeGroups = policy.groups.mode === 'exempt'
+  const cutoff = now - DAY
+  return {
+    spent: store.countNewStrangersSince(session, cutoff, excludeGroups),
+    slotFreesAt: (limit: number) =>
+      store.newStrangerSlotFreesAt(session, cutoff, limit, DAY, excludeGroups),
+  }
+}
+
 function strangerCap(inputs: GateInputs): GateResult {
   const { policy, store, ctx } = inputs
   const limit = policy.contacts.maxNewStrangersPerDay
   if (!Number.isFinite(limit)) return allow
   if (!opensAStranger(inputs)) return allow
-  const cutoff = ctx.now - DAY
-  if (store.countNewStrangersSince(ctx.session, cutoff) < limit) return allow
-  const until = store.newStrangerSlotFreesAt(ctx.session, cutoff, limit, DAY)
+  const budget = countsNewStrangers(policy, store, ctx.session, ctx.now)
+  if (budget.spent < limit) return allow
+  const until = budget.slotFreesAt(limit)
   return {
     kind: 'wait',
     until: until ?? ctx.now + HOUR,
@@ -237,9 +258,9 @@ function warmupNewContacts(inputs: GateInputs): GateResult {
   const step = warmupStep(policy, session, ctx.now)
   if (!step) return allow
   if (!opensAStranger(inputs)) return allow
-  const cutoff = ctx.now - DAY
-  if (store.countNewStrangersSince(ctx.session, cutoff) < step.maxNewContactsPerDay) return allow
-  const until = store.newStrangerSlotFreesAt(ctx.session, cutoff, step.maxNewContactsPerDay, DAY)
+  const budget = countsNewStrangers(policy, store, ctx.session, ctx.now)
+  if (budget.spent < step.maxNewContactsPerDay) return allow
+  const until = budget.slotFreesAt(step.maxNewContactsPerDay)
   return {
     kind: 'wait',
     until: until ?? ctx.now + HOUR,
