@@ -573,6 +573,27 @@ export class Store {
     return row ? row.sent_at + windowMs : null
   }
 
+  /**
+   * Sends to one chat since `since` — the per-contact half of the window model.
+   *
+   * The handshake cap uses this instead of `contacts.out_count` because that column is a
+   * lifetime figure: a contact who never replied was muted forever, which read as "this
+   * person rejected us" when all it meant was that they were busy on a Sunday. Counting
+   * from `sends` keeps `out_count` an honest lifetime total for the other gates and for
+   * `/_guard/contact`, and inherits two properties for free — `voidSend` deletes the row so
+   * a send that never reached WhatsApp does not spend the day, and `linkIdentity` rewrites
+   * `sends.chat_id` so a contact known under two spellings is counted once.
+   *
+   * Human sends count. A message typed on the phone is still a message the recipient has
+   * not answered, which is the thing being rationed.
+   */
+  countSendsToContactSince(session: string, chatId: string, since: number): number {
+    const row = this.db
+      .query('SELECT COUNT(*) AS n FROM sends WHERE session = ? AND chat_id = ? AND sent_at > ?')
+      .get(session, this.resolveChatId(session, chatId), since) as { n: number }
+    return row.n
+  }
+
   lastSendAt(session: string): number | null {
     const row = this.db
       .query('SELECT MAX(sent_at) AS t FROM sends WHERE session = ?')

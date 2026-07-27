@@ -74,6 +74,25 @@ export function fromZoned(
   return ts
 }
 
+/**
+ * Midnight starting the calendar day `ts` falls in, in `timezone`.
+ *
+ * Per-day budgets that reset on a wall-clock boundary live here rather than in a
+ * `now - DAY` window: "one unanswered message per day" is a statement about the
+ * recipient's day, and a rolling 24h window would refuse a 09:00 follow-up because
+ * yesterday's went out at 10:00.
+ */
+export function startOfZonedDay(ts: number, timezone: string): number {
+  const p = zonedParts(ts, timezone)
+  return fromZoned(timezone, p.year, p.month, p.day, 0, 0)
+}
+
+/** Midnight ending the calendar day `ts` falls in — when a per-day budget frees up. */
+export function startOfNextZonedDay(ts: number, timezone: string): number {
+  const p = zonedParts(ts, timezone)
+  return fromZoned(timezone, p.year, p.month, p.day + 1, 0, 0)
+}
+
 export function parseHhMm(value: string): number {
   const [h, m] = value.split(':')
   return Number(h) * 60 + Number(m)

@@ -137,6 +137,7 @@ request
  → classify        contact state: known | handshake_sent | stranger | opted_out
  → policy gates    opt-out · human touch · handshake cap · reply ratio · degraded mode
                    · quiet hours · stranger cap · warmup budget · sliding windows
+                   (x-guard-force skips the budget gates only — see below)
  → pace            spacing + gaussian jitter × contact-state multiplier
  → typing plan     sampled WPM → composing/paused cycles, re-issued before expiry
  → forward         to WAHA
@@ -162,6 +163,54 @@ Two modes, because it changes your app's contract:
 Policy refusals fail **closed** (`403`/`429`). Infrastructure failures fail **loud**: if WAHA
 is unreachable you get a `502`, never a silent drop and never an unguarded pass-through.
 
+### Forcing one send past a limit
+
+Sometimes a budget is wrong about one specific message, and the person who knows that is a
+human. `x-guard-force: 1` on a single send overrides the guard's **own pacing and volume
+budgets** for that request:
+
+```bash
+curl -X POST localhost:3010/api/sendText \
+  -H 'x-api-key: ...' \
+  -H 'x-guard-force: 1' \
+  -H 'x-guard-force-reason: operator approved the Monday re-ping' \
+  -d '{"session":"default","chatId":"351900000000@c.us","text":"..."}'
+```
+
+What it may override: `handshake_exhausted`, `reply_ratio`, `new_contact_budget`,
+`warmup_budget`, `warmup_new_contacts`, `rate_minute` / `_hour` / `_day`. These are numbers we
+guessed and wrote down.
+
+What it may **never** override, and why:
+
+| Gate | Why not |
+|---|---|
+| `opted_out` | Consent. A flag that could override it would make every other guarantee conditional. |
+| `session_stopped` | A safety stop. Forcing past it is forcing past the alarm, not the fire. |
+| `no_human_touch` | The relationship control. Skipping it turns force into a cold-outreach switch. |
+| `group_blocked` | A policy statement that this session does not post to groups, not a budget that ran out. |
+| `degraded` | WhatsApp itself is rate-limiting you. The one gate whose input is the platform's opinion. |
+| `quiet_hours` · `quiet_day` | A 03:00 message is not worth forcing, and the send goes at 08:00 by itself. |
+| `spacing` | Seconds, not a day, and it resolves itself inside `maxWaitMs`. Nothing to gain. |
+
+The design constraints are as deliberate as the allowlist:
+
+- **Per-request, never stored.** There is no way to grant force ahead of time, no permission
+  on a contact, no flag on a message. The approval being modelled is a human saying "send
+  that one anyway" about one message, so it lives exactly as long as the request does.
+- **No queue.** On a `queue`-mode session the header is refused with `guard.force_not_queueable`
+  rather than parked. A forced send succeeds or fails on the request that carried it; there
+  is no state in which a forced message is waiting for something.
+- **Not separately authenticated.** Reaching this path already needs WAHA's API key, and the
+  approval is a human decision rather than a credential. A second key would give the override
+  the appearance of an authorisation system without it being one.
+- **Loud.** Every request logs `force requested`, and every gate it actually overrode logs
+  `forced past a guard limit` with the reason code, the chat, and `x-guard-force-reason`.
+  `gate_forced_total{code}` counts them. An override nobody can find afterwards is a hole in
+  the audit trail.
+
+Both headers are stripped before the request reaches WAHA.
+
 ### Reason codes
 
 Every guard-generated response carries `X-Guard-Reason` and a JSON body with the same code,
@@ -171,8 +220,9 @@ so a client can branch on the reason without parsing prose.
 |---|---|---|
 | `guard.opted_out` | 403 | Recipient asked to stop. Terminal until cleared. |
 | `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
-| `guard.handshake_exhausted` | 403 | Unanswered-message limit for this contact reached. |
+| `guard.handshake_exhausted` | 403 | Today's unanswered-message limit for this contact is spent. Resets at midnight. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
+| `guard.force_not_queueable` | 400 | `x-guard-force` sent to a `queue`-mode session. |
 | `guard.group_blocked` | 403 | Policy refuses group sends from this session. |
 | `guard.unidentified_recipient` | 400 | No `chatId` in the request, so contact policy is blind. |
 | `guard.reply_ratio` | 429 | Sending far more than is coming back. |

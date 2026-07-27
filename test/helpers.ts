@@ -1,6 +1,6 @@
 import type { GuardConfig } from '../src/config.ts'
 import { Guard } from '../src/guard.ts'
-import { silentLogger } from '../src/observability/log.ts'
+import { type Logger, silentLogger } from '../src/observability/log.ts'
 import { deepMerge } from '../src/policy/load.ts'
 import type { DeepPartial, Policy, SessionPolicy } from '../src/policy/schema.ts'
 import { presetPolicy } from '../src/policy/schema.ts'
@@ -145,6 +145,8 @@ export interface HarnessOptions {
   store?: Store
   /** Deterministic jitter/WPM draws. */
   rng?: () => number
+  /** For the tests that assert on what the guard *said*, not just on what it did. */
+  log?: Logger
   echoConfirmMs?: number
   config?: Partial<GuardConfig>
 }
@@ -159,7 +161,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     policy: testPolicy(options.policy, options.preset ?? 'off'),
     store,
     clock,
-    log: silentLogger,
+    log: options.log ?? silentLogger,
     rng: options.rng ?? (() => 0.5),
     echoConfirmMs: options.echoConfirmMs ?? 0,
     startWorker: false,

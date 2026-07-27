@@ -225,6 +225,7 @@ export class Guard {
       )
     }
 
+    const { force, forceReason } = parseForce(req.headers)
     const text = textFromSendBody(body, match.textField ?? null)
     const job = {
       session,
@@ -233,13 +234,31 @@ export class Guard {
       textLength: text.length,
       method: req.method,
       path: `${url.pathname}${url.search}`,
-      headers: req.headers,
+      // The guard's own headers are a statement to the guard, not to WhatsApp, and the
+      // queue replays this set verbatim — neither may carry the override onward.
+      headers: stripGuardHeaders(req.headers),
       body: raw,
       arrivedAt: this.clock.now(),
       signal: req.signal,
+      force,
+      forceReason,
     }
 
-    if (policy.backpressure.mode === 'queue') return this.enqueue(job)
+    if (policy.backpressure.mode === 'queue') {
+      // A forced send goes now or fails now. Accepting it here would mean storing the
+      // override on a row and draining it later, which is a place where forced messages
+      // wait — the thing that was deleted after 48 died in a queue against 27 released.
+      if (force) {
+        return this.guardError(
+          400,
+          'guard.force_not_queueable',
+          'x-guard-force is only honoured when backpressure.mode is `block`: a forced send ' +
+            'must succeed or fail on this request, never be parked in a queue. Send it ' +
+            'without the header, or switch the session to block mode.',
+        )
+      }
+      return this.enqueue(job)
+    }
 
     const result = await this.sender.send(job)
     switch (result.status) {
@@ -510,6 +529,39 @@ export class Guard {
 
     return this.guardError(404, 'guard.not_found', `no guard endpoint at ${path}`)
   }
+}
+
+const FORCE_HEADER = 'x-guard-force'
+const FORCE_REASON_HEADER = 'x-guard-force-reason'
+
+/**
+ * `x-guard-force: 1` — an operator-approved override for this one send.
+ *
+ * A header rather than a body field because the body is forwarded to WAHA byte-for-byte:
+ * this is a statement to the guard, not to WhatsApp. And a header rather than a stored
+ * permission or a durable flag on a message, because the approval being modelled is a human
+ * saying "send it anyway" about one message. There is deliberately no way to grant force
+ * ahead of time, and nothing anywhere records that a send *wants* forcing.
+ *
+ * It is not separately authenticated. Reaching this path already requires WAHA's API key,
+ * and the approval is a human decision, not a credential — a second key would give the
+ * override the look of an authorisation system without adding one. What makes it safe is
+ * the short list of gates it may touch (see `forceable` in gates.ts) and the fact that
+ * every use is logged.
+ */
+function parseForce(headers: Headers): { force: boolean; forceReason: string | null } {
+  const raw = headers.get(FORCE_HEADER)?.trim().toLowerCase()
+  const force = raw === '1' || raw === 'true' || raw === 'yes'
+  if (!force) return { force: false, forceReason: null }
+  const reason = headers.get(FORCE_REASON_HEADER)?.trim()
+  return { force: true, forceReason: reason ? reason.slice(0, 200) : null }
+}
+
+function stripGuardHeaders(headers: Headers): Headers {
+  const copy = new Headers(headers)
+  copy.delete(FORCE_HEADER)
+  copy.delete(FORCE_REASON_HEADER)
+  return copy
 }
 
 /** Headers that belong to the original HTTP hop and must not be replayed from the queue. */

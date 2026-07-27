@@ -1,6 +1,13 @@
 import type { ContactState, SessionPolicy } from '../policy/schema.ts'
 import type { ContactRow, SessionStateRow, Store } from '../state/store.ts'
-import { DAY, HOUR, MINUTE, quietUntil } from '../util/time.ts'
+import {
+  DAY,
+  HOUR,
+  MINUTE,
+  quietUntil,
+  startOfNextZonedDay,
+  startOfZonedDay,
+} from '../util/time.ts'
 import { isGroupChatId } from '../waha/message.ts'
 
 /**
@@ -28,6 +35,12 @@ export interface SendContext {
   now: number
   /** Drawn once per request so re-evaluation does not re-roll the dice. */
   jitterMs: number
+  /**
+   * An operator-approved override for this one send. Skips the pacing and volume gates
+   * listed as `forceable` in GATES; never consent, never a safety stop. Per-request and
+   * never persisted — see `forceable` below and README "Forcing one send past a limit".
+   */
+  force: boolean
 }
 
 export interface GateInputs {
@@ -186,16 +199,50 @@ function humanTouch(inputs: GateInputs): GateResult {
   }
 }
 
+/**
+ * How many unanswered messages may go to one contact — **per day**, not ever.
+ *
+ * It used to be per lifetime, read off `contacts.out_count`. That made the cap permanent:
+ * a contact who had not replied was muted until they wrote in first, and on 2026-07-27 a
+ * Monday follow-up to an employer was refused because the message before it went out on
+ * the Sunday. One unanswered message is not a rejection; one unanswered message *today* is
+ * as far as we should push in a day.
+ *
+ * The day is a calendar day in `quietHours.timezone`, deliberately reusing the zone quiet
+ * hours already resolves rather than introducing a second notion of "day" — the whole point
+ * is the recipient's day, and a rolling 24h window would refuse a 09:00 follow-up because
+ * yesterday's went out at 10:00. The zone is read even when quiet hours are disabled; it is
+ * the session's timezone, and quiet hours are just its other consumer.
+ *
+ * A conversation that crosses midnight counts as two days by this gate and one by any human
+ * reading the thread. That is accepted rather than solved: quiet hours (22:00–08:00 Lisbon)
+ * mean the only traffic that can straddle the boundary is traffic we already refuse, and a
+ * cleverer rule would be untestable for a case that cannot occur.
+ *
+ * This stays a `deny`, not a `wait`. A `wait` would park the message and fire it when the
+ * day rolls over, which is a queue of messages waiting on a clock — the shape that was
+ * deleted on 2026-07-25. The reason line names the date instead, so the caller can decide.
+ */
 function handshake(inputs: GateInputs): GateResult {
-  const { policy, contact } = inputs
+  const { policy, store, contact, ctx } = inputs
   if (groupExempt(inputs)) return allow
   if (contact.in_count > 0) return allow
-  if (contact.out_count < policy.contacts.handshakeMaxMessages) return allow
+  const timezone = policy.quietHours.timezone
+  const sentToday = store.countSendsToContactSince(
+    ctx.session,
+    ctx.chatId,
+    startOfZonedDay(ctx.now, timezone),
+  )
+  if (sentToday < policy.contacts.handshakeMaxMessages) return allow
+  const resets = new Date(startOfNextZonedDay(ctx.now, timezone)).toISOString()
   return {
     kind: 'deny',
     status: 403,
     code: 'guard.handshake_exhausted',
-    reason: `${contact.out_count} message(s) sent with no reply; limit is ${policy.contacts.handshakeMaxMessages}`,
+    reason:
+      `${sentToday} message(s) sent today with no reply; limit is ` +
+      `${policy.contacts.handshakeMaxMessages} per day (${contact.out_count} sent in total). ` +
+      `Resets at ${resets} — ${timezone} midnight.`,
   }
 }
 
@@ -363,31 +410,77 @@ function spacing(inputs: GateInputs): GateResult {
   }
 }
 
+interface Gate {
+  run: (inputs: GateInputs) => GateResult
+  /**
+   * May an operator-approved `force` skip this gate?
+   *
+   * The line is: `force` overrides **our own pacing and volume budgets**, which are guesses
+   * we wrote down. It never overrides consent, a human's deliberate decision, or a signal
+   * coming from outside the guard.
+   *
+   *  - `optOut` — consent. `CLAUDE.md` in the calling project is unambiguous and so is this:
+   *    nothing overrides an opt-out, and a flag that could would make every other guarantee
+   *    conditional.
+   *  - `sessionStopped` — a safety stop, set because something went wrong. Forcing past it
+   *    is forcing past the alarm rather than the fire.
+   *  - `humanTouch` — the relationship control. Skipping it turns `force` into a cold-outreach
+   *    switch, which is the exact behaviour that got a number unlinked on 2026-07-25.
+   *  - `groupBlocked` — a policy statement that this session does not post to groups. Not a
+   *    budget that ran out.
+   *  - `timelock` — WhatsApp itself is rate-limiting us. This is the one gate whose input is
+   *    the platform's opinion, and pushing through it is how a number dies.
+   *  - `quietHours` — a 03:00 message is not worth forcing. It is also self-resolving: the
+   *    send goes at 08:00 on its own. Decided explicitly, not by omission.
+   *  - `spacing` — seconds, not a day, and it self-resolves inside `maxWaitMs`. The cheapest
+   *    anti-ban behaviour there is; there is nothing to gain by skipping it.
+   */
+  forceable: boolean
+}
+
 /**
  * Order matters. Denials come first so a caller learns "never" before it learns "later" —
  * telling someone to retry in 40 minutes when the contact opted out is a worse answer.
  */
-const GATES: ((inputs: GateInputs) => GateResult)[] = [
-  sessionStopped,
-  groupBlocked,
-  optOut,
-  humanTouch,
-  handshake,
-  replyRatio,
-  timelock,
-  quietHours,
-  strangerCap,
-  warmupNewContacts,
-  warmupBudget,
-  slidingWindows,
-  spacing,
+const GATES: Gate[] = [
+  { run: sessionStopped, forceable: false },
+  { run: groupBlocked, forceable: false },
+  { run: optOut, forceable: false },
+  { run: humanTouch, forceable: false },
+  { run: handshake, forceable: true },
+  { run: replyRatio, forceable: true },
+  { run: timelock, forceable: false },
+  { run: quietHours, forceable: false },
+  { run: strangerCap, forceable: true },
+  { run: warmupNewContacts, forceable: true },
+  { run: warmupBudget, forceable: true },
+  { run: slidingWindows, forceable: true },
+  { run: spacing, forceable: false },
 ]
 
-export function evaluate(inputs: GateInputs): GateResult {
+export interface GateEvaluation {
+  result: GateResult
+  /**
+   * Reason codes of the gates a `force` actually overrode — gates that would have refused
+   * this send. Empty when `ctx.force` is false, and empty when force was requested but
+   * nothing was in the way. The caller logs these: an override nobody can find afterwards
+   * is a hole in the only audit trail we have for sends that bypass the mailbox.
+   */
+  forced: string[]
+}
+
+export function evaluate(inputs: GateInputs): GateEvaluation {
   let latest: GateResult | null = null
+  const forced: string[] = []
   for (const gate of GATES) {
-    const result = gate(inputs)
-    if (result.kind === 'deny') return result
+    const result = gate.run(inputs)
+    if (inputs.ctx.force && gate.forceable) {
+      // Run it anyway and report only the gates that would have said no, so the audit line
+      // names the limit that was actually overridden rather than every gate force may touch.
+      if (result.kind !== 'allow') forced.push(result.code)
+      continue
+    }
+    if (result.kind === 'deny') return { result, forced }
     if (
       result.kind === 'wait' &&
       (latest === null || result.until > (latest as { until: number }).until)
@@ -395,5 +488,5 @@ export function evaluate(inputs: GateInputs): GateResult {
       latest = result
     }
   }
-  return latest ?? allow
+  return { result: latest ?? allow, forced }
 }

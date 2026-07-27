@@ -8,7 +8,7 @@ import type { Clock } from '../util/clock.ts'
 import { KeyedMutex } from '../util/mutex.ts'
 import { defaultRng, gaussian, type Rng } from '../util/random.ts'
 import { primaryMessageId } from '../waha/message.ts'
-import { evaluate, type GateResult } from './gates.ts'
+import { evaluate } from './gates.ts'
 import { planTyping } from './typing.ts'
 
 export interface SendJob {
@@ -24,6 +24,13 @@ export interface SendJob {
   body: Uint8Array
   arrivedAt: number
   signal?: AbortSignal
+  /**
+   * An operator-approved override for this one send (`x-guard-force`). Skips the forceable
+   * gates only, and exists for exactly as long as this request does.
+   */
+  force?: boolean
+  /** Free text from `x-guard-force-reason`, carried into the audit line. */
+  forceReason?: string | null
 }
 
 export type SendResult =
@@ -79,6 +86,18 @@ export class Sender {
     const deadline = job.arrivedAt + policy.backpressure.maxWaitMs
     const jitterMs = Math.max(0, gaussian(0, policy.rates.jitterStddevMs, this.rng))
 
+    // Logged on request, not on effect: a forced send that then fails upstream still has to
+    // appear in the record, and these logs are the only trace of a send that bypasses the
+    // mailbox. `awaitGates` adds a line per limit actually overridden.
+    if (job.force) {
+      log.warn('force requested', {
+        session: job.session,
+        chatId: job.chatId,
+        route: job.route,
+        forceReason: job.forceReason ?? null,
+      })
+    }
+
     const gateOutcome = await this.awaitGates(job, policy, deadline, jitterMs)
     if (gateOutcome.status !== 'ok') return gateOutcome.result
 
@@ -121,7 +140,13 @@ export class Sender {
     const { response: replayed, msgId } = await this.captureMessageId(response)
     if (msgId) store.attachMessageId(sendId, msgId)
     metrics.inc('sends_total', { session: job.session, route: job.route })
-    log.info('sent', { session: job.session, chatId: job.chatId, route: job.route, msgId })
+    log.info('sent', {
+      session: job.session,
+      chatId: job.chatId,
+      route: job.route,
+      msgId,
+      forced: job.force === true,
+    })
     return { status: 'sent', response: replayed, msgId }
   }
 
@@ -133,11 +158,13 @@ export class Sender {
     jitterMs: number,
   ): Promise<{ status: 'ok' } | { status: 'stop'; result: SendResult }> {
     const { store, clock, metrics, log } = this.deps
+    // The gates are re-run every round; an override must be reported once, not once per loop.
+    const announced = new Set<string>()
     for (let round = 0; round < MAX_GATE_ROUNDS; round++) {
       const now = clock.now()
       const contact = store.ensureContact(job.session, job.chatId, now)
       const session = store.ensureSession(job.session, now)
-      const result: GateResult = evaluate({
+      const { result, forced } = evaluate({
         policy,
         store,
         contact,
@@ -149,8 +176,22 @@ export class Sender {
           route: job.route,
           now,
           jitterMs,
+          force: job.force === true,
         },
       })
+
+      for (const code of forced) {
+        if (announced.has(code)) continue
+        announced.add(code)
+        metrics.inc('gate_forced_total', { session: job.session, code })
+        log.warn('forced past a guard limit', {
+          session: job.session,
+          chatId: job.chatId,
+          route: job.route,
+          code,
+          forceReason: job.forceReason ?? null,
+        })
+      }
 
       if (result.kind === 'allow') return { status: 'ok' }
 

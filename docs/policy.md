@@ -111,11 +111,35 @@ The relationship gates. These are the ones that matter.
 |---|---|---|---|
 | `requireHumanTouch` | `true` | `false` | **judgement.** Refuse to send to any contact the guard has never seen a human message — either an inbound message, or an outbound one the guard did not send. |
 | `maxNewStrangersPerDay` | 5 | 20 | **guess** |
-| `handshakeMaxMessages` | 1 | 2 | **judgement.** How many messages may go to someone who has never replied. One is the honest number. |
+| `handshakeMaxMessages` | 1 | 2 | **judgement.** How many messages **per day** may go to someone who has never replied. One is the honest number. |
 
 `requireHumanTouch` is the single most useful control here and the one most likely to be
 turned off for the wrong reason. It encodes the pattern that actually works: a human makes
 first contact, automation takes over from the reply.
+
+`handshakeMaxMessages` is a **daily** allowance, counted over the sends to that contact since
+midnight. It used to be a lifetime one, read off `contacts.out_count`, and that made it
+permanent: a contact who never replied was muted until they wrote in first — which is exactly
+what an unanswered contact cannot be relied on to do. A Monday follow-up was refused because
+the message before it went out on the Sunday, and a man who is busy on a Sunday has not
+rejected you. One unanswered message *ever* is not a rule anyone wants; one unanswered
+message *per day* is.
+
+The day is a calendar day in **`quietHours.timezone`**, reusing the zone quiet hours already
+resolves rather than introducing a second notion of "day" — the point is the recipient's day,
+and a rolling 24h window would refuse a 09:00 follow-up because yesterday's went out at 10:00.
+The zone is read even when `quietHours.enabled` is false; it is the session's timezone and
+quiet hours are just its other consumer.
+
+A conversation crossing midnight is two days to this gate and one to any human reading the
+thread. That is accepted rather than solved: with quiet hours on, the only traffic that could
+straddle the boundary is traffic already being refused.
+
+The refusal stays a **`403`**, not a wait until midnight. A wait would park the message and
+fire it when the day rolls over, and a message that sits somewhere waiting for a clock is the
+thing this project keeps deleting. The reason line names the reset time instead, so the caller
+decides. `contacts.out_count` is untouched by all of this and remains a true lifetime total
+for `GET /_guard/contact` and for anything else that wants one.
 
 `maxNewStrangersPerDay` counts only chats **this number opened** — a first outbound to
 someone the guard has no earlier inbound from. Replying to a person who messaged you first
