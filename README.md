@@ -232,7 +232,8 @@ so a client can branch on the reason without parsing prose.
 | `guard.warmup_budget` · `guard.warmup_new_contacts` | 429 | Warmup ramp for this session is spent. |
 | `guard.new_contact_budget` | 429 | Daily limit on conversations *this number* starts. |
 | `guard.degraded` | 429 | Upstream signalled a rate limit; only replies are going out. |
-| `guard.session_stopped` | 503 | Session is `FAILED` / logged out. Nothing will send. |
+| `guard.session_reconnecting` | 429 | Session dropped and is expected straight back. The send already waited out `backpressure.maxWaitMs`; nothing was sent, so retry. |
+| `guard.session_stopped` | 503 | Session is `FAILED` / logged out, or has been stopped longer than `sessionHealth.transientGraceMs`. Nothing will send. |
 | `guard.upstream_unreachable` | 502 | WAHA did not answer. Nothing was sent. |
 
 ## The contact graph

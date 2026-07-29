@@ -75,6 +75,14 @@ function validate(p: Policy): void {
       if (s.typing.pauseMaxMs < s.typing.pauseMinMs)
         problems.push(`${scope}.typing.pauseMaxMs must be >= pauseMinMs`)
     }
+    if (s.sessionHealth.poll.enabled && s.sessionHealth.poll.intervalMs <= 0)
+      problems.push(`${scope}.sessionHealth.poll.intervalMs must be > 0`)
+    if (s.sessionHealth.recheckMs <= 0)
+      problems.push(`${scope}.sessionHealth.recheckMs must be > 0`)
+    if (s.sessionHealth.transientGraceMs < 0)
+      problems.push(`${scope}.sessionHealth.transientGraceMs must be >= 0`)
+    if (s.sessionHealth.autoRestart.enabled && s.sessionHealth.autoRestart.cooldownMs <= 0)
+      problems.push(`${scope}.sessionHealth.autoRestart.cooldownMs must be > 0`)
     if (s.warmup.enabled) {
       if (s.warmup.schedule.length === 0)
         problems.push(`${scope}.warmup.schedule must not be empty`)

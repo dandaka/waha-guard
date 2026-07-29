@@ -6,6 +6,7 @@ import type { Store } from '../state/store.ts'
 import type { Clock } from '../util/clock.ts'
 import { isLidChatId, phoneChatIdFromJid } from '../waha/identity.ts'
 import { ackLevel, isGroupChatId, type ObservedMessage, observeMessage } from '../waha/message.ts'
+import { applySessionStatus } from '../waha/session-health.ts'
 
 export interface WahaEvent {
   event: string
@@ -221,27 +222,16 @@ export class Observer {
     }
   }
 
+  /**
+   * The fast path for session status. The slow path is `SessionMonitor`, which re-reads the
+   * same thing on an interval — because this one arrives over a webhook, and a webhook that
+   * fails to arrive used to leave the session latched off indefinitely. Both fold through
+   * `applySessionStatus` so they cannot disagree.
+   */
   private onSessionStatus(event: WahaEvent): void {
     const payload = event.payload as { status?: unknown } | null
-    const status = typeof payload?.status === 'string' ? payload.status.toUpperCase() : null
+    const status = typeof payload?.status === 'string' ? payload.status : null
     if (!status) return
-    const now = this.deps.clock.now()
-    // A session that is not WORKING cannot send; a session that FAILED or logged out is
-    // the shape of an account action, and the right move is to stop, loudly.
-    const halting = ['FAILED', 'STOPPED', 'SCAN_QR_CODE'].includes(status)
-    if (halting) {
-      this.deps.store.setStopped(event.session, `session status ${status}`, now)
-      this.deps.metrics.inc('session_halts_total', { session: event.session, status })
-      this.deps.log.error('session is not able to send — outbound stopped', {
-        session: event.session,
-        status,
-      })
-    } else if (status === 'WORKING') {
-      const existing = this.deps.store.getSession(event.session)
-      if (existing?.stopped_reason) {
-        this.deps.store.setStopped(event.session, null, now)
-        this.deps.log.info('session recovered — outbound resumed', { session: event.session })
-      }
-    }
+    applySessionStatus(this.deps, event.session, status, 'webhook')
   }
 }

@@ -154,8 +154,41 @@ function opensAStranger(inputs: GateInputs): boolean {
 
 // ---- individual gates -------------------------------------------------------
 
-function sessionStopped({ session }: GateInputs): GateResult {
+/**
+ * Statuses a session can come back from on its own, in seconds, without anybody doing
+ * anything. `FAILED` and `SCAN_QR_CODE` are deliberately absent: they are the shape of an
+ * account action, and riding one out would mean sitting quietly through an unlink.
+ */
+const TRANSIENT_STOP_STATUSES = new Set(['STOPPED', 'STARTING'])
+
+/**
+ * A stopped session cannot send — but "stopped" covers two different things.
+ *
+ * A gows websocket drop stops the session and reconnects a second or two later. Refusing
+ * outright there destroys a message over a blip: on 2026-07-29 six such flaps cost two real
+ * sends, both of which would have gone out had the guard waited three seconds. Inside the
+ * grace window this is a `wait`, so `backpressure: block` rides it out and the poller's next
+ * read clears the stop underneath the waiting send.
+ *
+ * Past the grace window it is a denial again, and quickly. A caller that waits out the full
+ * backpressure budget on every request during a real outage learns nothing and blocks its
+ * own queue; a 503 tells it the truth.
+ */
+function sessionStopped({ session, policy, ctx }: GateInputs): GateResult {
   if (!session.stopped_reason) return allow
+
+  const transient =
+    session.stopped_status !== null && TRANSIENT_STOP_STATUSES.has(session.stopped_status)
+  const stoppedFor = session.stopped_since === null ? null : ctx.now - session.stopped_since
+  if (transient && stoppedFor !== null && stoppedFor < policy.sessionHealth.transientGraceMs) {
+    return {
+      kind: 'wait',
+      until: ctx.now + policy.sessionHealth.recheckMs,
+      code: 'guard.session_reconnecting',
+      reason: `session is reconnecting (${session.stopped_status}, ${Math.round(stoppedFor / 1000)}s)`,
+    }
+  }
+
   return {
     kind: 'deny',
     status: 503,

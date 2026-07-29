@@ -12,6 +12,7 @@ import { Store } from './state/store.ts'
 import { type Clock, systemClock } from './util/clock.ts'
 import type { Rng } from './util/random.ts'
 import { chatIdFromSendBody, sessionFromSendBody, textFromSendBody } from './waha/message.ts'
+import { SessionMonitor } from './waha/session-health.ts'
 import { Downstream } from './webhook/downstream.ts'
 import { Observer, parseEvents } from './webhook/observer.ts'
 
@@ -25,6 +26,8 @@ export interface GuardOptions {
   echoConfirmMs?: number
   /** Queue mode drains in-process; tests drive it by hand instead. */
   startWorker?: boolean
+  /** Session polling talks to WAHA on a timer; tests call `monitor.pollOnce()` instead. */
+  startMonitor?: boolean
 }
 
 interface GuardErrorBody {
@@ -41,6 +44,7 @@ export class Guard {
   readonly observer: Observer
   readonly downstream: Downstream
   readonly worker: QueueWorker
+  readonly monitor: SessionMonitor
   private readonly upstream: Upstream
   private readonly log: Logger
   private readonly clock: Clock
@@ -88,8 +92,18 @@ export class Guard {
       metrics: this.metrics,
       downstream: this.downstream,
     })
+    this.monitor = new SessionMonitor({
+      store: this.store,
+      upstream: this.upstream,
+      policy: () => this.policy,
+      clock: this.clock,
+      log: this.log,
+      metrics: this.metrics,
+      apiKey: options.config.upstreamApiKey,
+    })
     this.registerGauges()
     if (options.startWorker !== false) this.worker.start()
+    if (options.startMonitor !== false) this.monitor.start()
   }
 
   setPolicy(policy: Policy): void {
@@ -97,6 +111,7 @@ export class Guard {
   }
 
   async close(): Promise<void> {
+    this.monitor.stop()
     await this.worker.stop()
     this.observer.close()
     this.store.close()
@@ -394,6 +409,19 @@ export class Guard {
           return {
             session: s.session,
             stopped: s.stopped_reason,
+            // A stop that is still inside the grace window is a reconnect in progress, not
+            // an outage — the difference decides whether sends are waiting or failing, and
+            // it is the first thing anyone opening this endpoint wants to know.
+            stoppedStatus: s.stopped_status,
+            stoppedSince: s.stopped_since,
+            stoppedKind:
+              s.stopped_reason === null
+                ? null
+                : s.stopped_since !== null &&
+                    now - s.stopped_since < policy.sessionHealth.transientGraceMs &&
+                    (s.stopped_status === 'STOPPED' || s.stopped_status === 'STARTING')
+                  ? 'reconnecting'
+                  : 'outage',
             degradedUntil: s.timelock_until && s.timelock_until > now ? s.timelock_until : null,
             rateMultiplier: s.rate_multiplier,
             warmupDay: Math.floor((now - s.warmup_started_at) / 86_400_000),

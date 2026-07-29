@@ -251,6 +251,41 @@ Adaptive backoff from delivery signals.
 Messages that stop being delivered is the earliest signal available that something is wrong
 with the number, and it arrives before any status change does.
 
+## `sessionHealth`
+
+Whether the session can send at all — and how the guard finds that out.
+
+| Key | Default | Provenance |
+|---|---|---|
+| `poll.enabled` | `true` | **judgement** — see below |
+| `poll.intervalMs` | 15000 | **guess** — cheap, container-local call |
+| `transientGraceMs` | 120000 | **measured, loosely** — observed reconnects cleared in 1–3s; two minutes is far past that |
+| `recheckMs` | 3000 | **guess** — how often a waiting send re-checks |
+| `autoRestart.enabled` | `true` | **judgement** |
+| `autoRestart.afterMs` | 60000 | **guess** — a reconnect that has not happened within a minute is not going to |
+| `autoRestart.cooldownMs` | 300000 | **guess** |
+
+Session status arrives on a webhook, and for a long time that was the guard's only source of
+truth: `STOPPED` latched outbound off and only a later `WORKING` unlatched it. Two problems
+with that, both seen in production on 2026-07-29.
+
+**A lost event is permanent.** The clearing `WORKING` is the event most likely to go missing,
+because a flapping session is exactly when the webhook sender is also failing. One dropped
+event left the guard refusing every send while WAHA reported the session healthy, and nothing
+in the guard ever re-asked. `poll` re-reads the status on an interval, so a lost event costs
+one interval rather than the rest of the day. Turning it off returns to trusting webhooks
+alone. It needs `GUARD_UPSTREAM_API_KEY`; without one WAHA answers 401, and the guard says so
+at startup rather than degrading quietly.
+
+**Not every stop is an outage.** A dropped websocket stops the session and it is back a second
+or two later. Inside `transientGraceMs` a `STOPPED` is a `wait` rather than a denial, so
+`backpressure: block` rides it out and the send goes when the session returns. Past the window
+it is a 503 again — waiting out a real outage on every request is worse than a fast refusal.
+
+`FAILED` and `SCAN_QR_CODE` are never treated as transient and never auto-restarted. They are
+the shape of an account action, and quietly retrying one is how an unlink becomes something
+nobody is told about. Those stop, loudly, and wait for a human.
+
 ## `routes`
 
 | Key | Default |

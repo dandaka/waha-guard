@@ -301,6 +301,139 @@ describe('session health', () => {
     )
     expect((await sendText('a@c.us')).status).toBe(200)
   })
+
+  const stopEvent = (status: string, session = 'default') =>
+    webhookRequest({ event: 'session.status', session, payload: { status } })
+
+  test('a send waits out a brief STOPPED instead of failing on it', async () => {
+    // The 2026-07-29 shape: the socket drops, the session stops, and it is back seconds
+    // later. Two real messages died in that gap.
+    harness = await startHarness({ policy: { backpressure: { mode: 'block', maxWaitMs: 30_000 } } })
+    await harness.guard.fetch(stopEvent('STOPPED'))
+
+    const pending = sendText('a@c.us')
+    // Nothing has reached WAHA yet — the send is parked, not refused.
+    expect(sends()).toHaveLength(0)
+
+    await harness.guard.fetch(stopEvent('WORKING'))
+    const res = await withClock(harness.clock, pending, 10_000)
+    expect(res.status).toBe(200)
+    expect(sends()).toHaveLength(1)
+  })
+
+  test('a STOPPED session past the grace window is refused, not waited out', async () => {
+    harness = await startHarness({ policy: { sessionHealth: { transientGraceMs: 60_000 } } })
+    await harness.guard.fetch(stopEvent('STOPPED'))
+    await harness.clock.advance(61_000)
+
+    const res = await sendText('a@c.us')
+    expect(res.status).toBe(503)
+    expect(res.headers.get('x-guard-reason')).toBe('guard.session_stopped')
+  })
+
+  test('a flap that never recovers becomes a 429 at the backpressure deadline', async () => {
+    // The caller is told "later", with a wait — not "no". Nothing reached WhatsApp, so the
+    // one thing that must never happen here is the message being treated as spent.
+    harness = await startHarness({ policy: { backpressure: { mode: 'block', maxWaitMs: 10_000 } } })
+    await harness.guard.fetch(stopEvent('STOPPED'))
+
+    const res = await withClock(harness.clock, sendText('a@c.us'), 30_000)
+    expect(res.status).toBe(429)
+    expect(res.headers.get('x-guard-reason')).toBe('guard.session_reconnecting')
+    expect(sends()).toHaveLength(0)
+  })
+
+  test('polling clears a stop whose WORKING webhook never arrived', async () => {
+    // The actual outage: WAHA said WORKING, the guard said stopped, and nothing in the
+    // guard ever re-asked. The fake WAHA reports WORKING by default.
+    harness = await startHarness({ policy: { sessionHealth: { transientGraceMs: 0 } } })
+    await harness.guard.fetch(stopEvent('STOPPED'))
+    expect((await sendText('a@c.us')).status).toBe(503)
+
+    await harness.guard.monitor.pollOnce()
+
+    expect(harness.store.getSession('default')?.stopped_reason).toBeNull()
+    expect((await sendText('a@c.us')).status).toBe(200)
+  })
+
+  test('polling stops outbound when WAHA reports a stop no webhook mentioned', async () => {
+    harness = await startHarness({ policy: { sessionHealth: { transientGraceMs: 0 } } })
+    harness.waha.reply('/api/sessions', () =>
+      Response.json([{ name: 'default', status: 'STOPPED' }]),
+    )
+
+    await harness.guard.monitor.pollOnce()
+
+    const row = harness.store.getSession('default')!
+    expect(row.stopped_status).toBe('STOPPED')
+    expect((await sendText('a@c.us')).status).toBe(503)
+  })
+
+  test('a re-announced stop does not refresh how long it has been stopped', async () => {
+    // Otherwise the grace window never expires: WAHA repeats the status, the clock resets,
+    // and a permanently dead session looks permanently fresh.
+    harness = await startHarness({ policy: { sessionHealth: { transientGraceMs: 60_000 } } })
+    await harness.guard.fetch(stopEvent('STOPPED'))
+    const since = harness.store.getSession('default')!.stopped_since
+
+    await harness.clock.advance(30_000)
+    await harness.guard.fetch(stopEvent('STOPPED'))
+
+    expect(harness.store.getSession('default')!.stopped_since).toBe(since)
+  })
+})
+
+describe('session watchdog', () => {
+  const starts = () =>
+    harness.waha.requests.filter((r) => r.path.includes('/start') && r.method === 'POST')
+
+  const stopped = async (status = 'STOPPED') => {
+    harness.waha.reply('/api/sessions', () => Response.json([{ name: 'default', status }]))
+    await harness.guard.monitor.pollOnce()
+  }
+
+  test('a session stopped past the threshold is asked to start', async () => {
+    harness = await startHarness({
+      policy: { sessionHealth: { autoRestart: { enabled: true, afterMs: 60_000 } } },
+    })
+    await stopped()
+    expect(starts()).toHaveLength(0)
+
+    await harness.clock.advance(61_000)
+    await stopped()
+
+    expect(starts()).toHaveLength(1)
+    expect(starts()[0]!.path).toBe('/api/sessions/default/start')
+  })
+
+  test('restarts respect the cooldown, so a session that cannot start is not hammered', async () => {
+    harness = await startHarness({
+      policy: {
+        sessionHealth: { autoRestart: { enabled: true, afterMs: 0, cooldownMs: 300_000 } },
+      },
+    })
+    await stopped()
+    expect(starts()).toHaveLength(1)
+
+    await harness.clock.advance(60_000)
+    await stopped()
+    expect(starts()).toHaveLength(1)
+
+    await harness.clock.advance(300_000)
+    await stopped()
+    expect(starts()).toHaveLength(2)
+  })
+
+  test('a FAILED session is never restarted — that is an account action, not a dropped socket', async () => {
+    harness = await startHarness({
+      policy: { sessionHealth: { autoRestart: { enabled: true, afterMs: 0 } } },
+    })
+    await stopped('FAILED')
+    await harness.clock.advance(3_600_000)
+    await stopped('FAILED')
+
+    expect(starts()).toHaveLength(0)
+  })
 })
 
 describe('timelock', () => {

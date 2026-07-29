@@ -70,6 +70,21 @@ export interface SessionStateRow {
   rate_multiplier: number
   multiplier_set_at: number | null
   stopped_reason: string | null
+  /**
+   * The upstream status behind `stopped_reason` — `STOPPED`, `FAILED`, `SCAN_QR_CODE`.
+   * Kept apart from the reason string because the gates branch on it: a `STOPPED` may be a
+   * two-second reconnect, a `FAILED` never is. Null on a row stopped before this column
+   * existed, which reads as "not known to be transient" and denies, as it always did.
+   */
+  stopped_status: string | null
+  /**
+   * When the session *entered* its current stop, not when the latest event about it
+   * arrived. WAHA re-announces a stop while it is still stopped, and refreshing this on
+   * every announcement would make a permanently stopped session look permanently fresh —
+   * so the grace window would never expire and every send would wait the full backpressure
+   * budget forever.
+   */
+  stopped_since: number | null
 }
 
 const MIGRATIONS: string[] = [
@@ -143,6 +158,9 @@ const MIGRATIONS: string[] = [
      PRIMARY KEY (session, alias)
    );
    CREATE INDEX contact_aliases_target ON contact_aliases (session, chat_id);`,
+  // Why a stop happened and when it started, so a flap can be told from an outage.
+  `ALTER TABLE session_state ADD COLUMN stopped_status TEXT;
+   ALTER TABLE session_state ADD COLUMN stopped_since INTEGER;`,
 ]
 
 const STATE_RANK: Record<ContactState, number> = {
@@ -721,11 +739,34 @@ export class Store {
       .run(until, multiplier, now, session)
   }
 
-  setStopped(session: string, reason: string | null, now: number): void {
+  /**
+   * Stop or resume a session. `reason: null` resumes and clears the whole stop.
+   *
+   * `stopped_since` is only set on the transition into a stop — `COALESCE` keeps the
+   * original timestamp when a stop is re-announced, which is what lets the grace window
+   * measure how long the session has actually been down.
+   */
+  setStopped(session: string, reason: string | null, now: number, status?: string | null): void {
     this.ensureSession(session, now)
+    if (reason === null) {
+      this.db
+        .query(
+          `UPDATE session_state
+           SET stopped_reason = NULL, stopped_status = NULL, stopped_since = NULL
+           WHERE session = ?`,
+        )
+        .run(session)
+      return
+    }
     this.db
-      .query('UPDATE session_state SET stopped_reason = ? WHERE session = ?')
-      .run(reason, session)
+      .query(
+        `UPDATE session_state
+         SET stopped_reason = ?,
+             stopped_status = ?,
+             stopped_since = COALESCE(stopped_since, ?)
+         WHERE session = ?`,
+      )
+      .run(reason, status ?? null, now, session)
   }
 
   setWarmupStart(session: string, at: number): void {

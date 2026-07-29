@@ -162,6 +162,56 @@ export interface AckPolicy {
   graceMinutes: number
 }
 
+/**
+ * How the guard decides whether a session can send at all.
+ *
+ * WAHA reports session status over the webhook, and for a long time that was the guard's
+ * only source of truth: `STOPPED` latched outbound off, and only a later `WORKING` event
+ * unlatched it. Two things make that unsafe.
+ *
+ * First, the clearing event is the one most likely to be lost — a webhook delivery failing
+ * is exactly the kind of moment a session is also unhealthy, and WAHA's sender gives up
+ * after its own retries. A single dropped `WORKING` left the line dead until someone
+ * noticed by hand. `poll` is the fix: the status is *re-read*, so a lost event costs one
+ * interval instead of the day.
+ *
+ * Second, not every stop is an outage. A gows websocket drop stops the session and
+ * reconnects a second or two later; on 2026-07-29 that happened six times in an hour and
+ * killed two real messages. Inside `transientGraceMs` a `STOPPED` is treated as a flap and
+ * the send *waits* (see `backpressure`), rather than being refused outright.
+ *
+ * `FAILED` and `SCAN_QR_CODE` are never treated as flaps: they are the shape of an account
+ * action, and waiting one out would be waiting out an unlink.
+ */
+export interface SessionHealthPolicy {
+  poll: {
+    enabled: boolean
+    /** How often to re-read session status from WAHA. */
+    intervalMs: number
+  }
+  /**
+   * How long a `STOPPED` session is treated as a recoverable flap. Past this, sends are
+   * denied — a caller waiting out a 20-minute outage on every request is worse than a fast,
+   * honest refusal.
+   */
+  transientGraceMs: number
+  /** How often a send waiting out a flap re-checks the gates. */
+  recheckMs: number
+  /**
+   * Ask WAHA to start a session that has stayed `STOPPED`. This is recovery from a dropped
+   * connection, not a login: it fires only for `STOPPED`, never for `FAILED` or
+   * `SCAN_QR_CODE`, so a number WhatsApp has unlinked still stops and waits for a human
+   * rather than being poked in a loop.
+   */
+  autoRestart: {
+    enabled: boolean
+    /** Continuous time stopped before the first restart attempt. */
+    afterMs: number
+    /** Minimum gap between attempts, so a session that cannot start is not hammered. */
+    cooldownMs: number
+  }
+}
+
 export interface RoutePolicy {
   /**
    * A send route the guard does not recognise is a bypass. Default is to refuse it and
@@ -186,6 +236,7 @@ export interface SessionPolicy {
   typing: TypingPolicy
   timelock: TimelockPolicy
   ack: AckPolicy
+  sessionHealth: SessionHealthPolicy
   routes: RoutePolicy
 }
 
@@ -277,6 +328,14 @@ const conservative: SessionPolicy = {
     maxUndeliveredRatio: 0.3,
     slowMultiplier: 2,
     graceMinutes: 10,
+  },
+  sessionHealth: {
+    poll: { enabled: true, intervalMs: 15_000 },
+    // Every flap observed so far cleared in 1-3s. Two minutes is far past that and still
+    // well inside the patience of a caller that retries.
+    transientGraceMs: 120_000,
+    recheckMs: 3_000,
+    autoRestart: { enabled: true, afterMs: 60_000, cooldownMs: 300_000 },
   },
   routes: { unknownSends: 'block', waived: [] },
 }
