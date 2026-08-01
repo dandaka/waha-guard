@@ -517,6 +517,49 @@ export class Guard {
     }
 
     /**
+     * Tell the guard that **they wrote to us**, at a time it was not there to see.
+     *
+     * Distinct from `/contact/human-touch`, and the distinction is the whole point. A touch
+     * says only "this relationship is not cold" — it is how a *permitted cold send* gets
+     * unlocked, so `opensAStranger` deliberately refuses to key on it (see the comment
+     * there). Using a touch to represent an inbound therefore clears `requireHumanTouch`
+     * and then walks the contact straight into `maxNewStrangersPerDay`, because as far as
+     * every counter can tell we are still the ones opening the conversation.
+     *
+     * That is not hypothetical: on 2026-08-01 fifteen people answered a CTWA ad, WAHA never
+     * delivered the webhooks, and the recovery marked them all as touched. The replies
+     * cleared one gate and were then held by the stranger budget, five per day.
+     *
+     * This records the real thing instead. `recordInbound` bumps `in_count`, which is what
+     * `opensAStranger` reads, and inserts an `inbound` row — which is what `coldOpens` reads,
+     * and it compares that row's timestamp against the first send to the chat. So `at` must
+     * be **when they actually wrote**, not now: a row dated after a send that already went
+     * out still leaves that send counted as a cold open.
+     */
+    if (req.method === 'POST' && path === '/_guard/contact/inbound') {
+      const body = (await req.json().catch(() => null)) as {
+        session?: string
+        chatId?: string
+        msgId?: string
+        at?: number
+      } | null
+      const session = body?.session ?? 'default'
+      const chatId = body?.chatId
+      if (!chatId) return this.guardError(400, 'guard.bad_request', 'chatId is required')
+      const at = typeof body?.at === 'number' && body.at > 0 ? body.at : this.clock.now()
+
+      const recorded = this.store.recordInbound(session, chatId, body?.msgId ?? null, at)
+      if (recorded) this.log.info('inbound adopted', { session, chatId, at })
+      return Response.json({
+        guard: true,
+        session,
+        chatId,
+        recorded,
+        contact: this.store.getContact(session, chatId),
+      })
+    }
+
+    /**
      * Tell the guard that two ids are one person.
      *
      * The observer learns this by itself from any message it sees, but only from a message it
