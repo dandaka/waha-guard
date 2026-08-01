@@ -228,7 +228,8 @@ function humanTouch(inputs: GateInputs): GateResult {
     status: 403,
     code: 'guard.no_human_touch',
     reason:
-      'no human has ever messaged this contact from this number — send the first message by hand, then automation may follow',
+      'this contact has never messaged, called or otherwise engaged with this number, and no ' +
+      'human has written to them from it — send the first message by hand, then automation may follow',
   }
 }
 

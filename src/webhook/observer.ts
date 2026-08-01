@@ -5,7 +5,14 @@ import type { Policy } from '../policy/schema.ts'
 import type { Store } from '../state/store.ts'
 import type { Clock } from '../util/clock.ts'
 import { isLidChatId, phoneChatIdFromJid } from '../waha/identity.ts'
-import { ackLevel, isGroupChatId, type ObservedMessage, observeMessage } from '../waha/message.ts'
+import {
+  ackLevel,
+  INTERACTION_EVENTS,
+  isGroupChatId,
+  type ObservedMessage,
+  observeInteraction,
+  observeMessage,
+} from '../waha/message.ts'
 import { applySessionStatus } from '../waha/session-health.ts'
 
 export interface WahaEvent {
@@ -93,8 +100,37 @@ export class Observer {
         this.onSessionStatus(event)
         break
       default:
+        if (INTERACTION_EVENTS.has(event.event)) this.onInteraction(event)
         break
     }
+  }
+
+  /**
+   * A call, a reaction, a poll vote, a deletion — something they did that is not a message.
+   *
+   * Recorded through `recordInbound`, the same path a message takes, because the three
+   * things it writes are all true of an interaction: `human_touch_at` (they have engaged
+   * with us, so a reply is not cold outreach), `state = known`, and `in_count`.
+   *
+   * `in_count` is the one worth pausing on, because two gates read it and this widens what
+   * it counts. `opensAStranger` uses it to decide whether a first send is us cold-opening
+   * someone — and a person who just rang us is not a stranger we chose off a list.
+   * `handshake` uses it to lift the unanswered-messages-per-day cap — and a 👍 on "consegue
+   * quinta às 8?" is an answer. Both readings stay true. Both also read it only as `> 0`
+   * versus `=== 0`, so an interaction that inflates the count (an edit of a message already
+   * counted, say) changes no decision.
+   */
+  private onInteraction(event: WahaEvent): void {
+    const { store, clock, log } = this.deps
+    const interaction = observeInteraction(event.event, event.payload)
+    // Ours: reacting to our own message says nothing about them.
+    if (!interaction || interaction.fromMe) return
+    const now = clock.now()
+    const chatId = this.identify(event.session, interaction, now)
+    if (!store.recordInbound(event.session, chatId, interaction.ids[0] ?? null, now)) return
+    this.deps.metrics.inc('inbound_total', { session: event.session })
+    this.deps.metrics.inc('interactions_total', { session: event.session, event: event.event })
+    log.info('interaction observed', { session: event.session, chatId, event: event.event })
   }
 
   /**
