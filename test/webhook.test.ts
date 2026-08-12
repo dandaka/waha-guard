@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { normalizeForOptOut, parseEvents } from '../src/webhook/observer.ts'
-import { type Harness, sendRequest, startHarness, webhookRequest } from './helpers.ts'
+import {
+  type Harness,
+  sendRequest,
+  startHarness,
+  startWebhookSink,
+  type WebhookSink,
+  webhookRequest,
+} from './helpers.ts'
 
 let harness: Harness
 
@@ -219,5 +226,78 @@ describe('acks', () => {
       payload: { id: 'someone-elses', ack: 3 },
     })
     expect(res.status).toBe(200)
+  })
+})
+
+/**
+ * One WAHA container, several sessions, one guard. The app tells accounts apart by the
+ * `?account=` on the webhook URL, so a session routed to the wrong target does not error —
+ * it silently files one line's conversations under another's. These tests exist for that
+ * failure, which no status code would reveal.
+ */
+describe('multi-session webhook routing', () => {
+  const sinks: WebhookSink[] = []
+
+  afterEach(async () => {
+    await Promise.all(sinks.splice(0).map((s) => s.stop()))
+  })
+
+  const twoSinks = () => {
+    const pedro = startWebhookSink()
+    const alex = startWebhookSink()
+    sinks.push(pedro, alex)
+    return { pedro, alex }
+  }
+
+  const message = (session: string) => ({
+    event: 'message',
+    session,
+    payload: { id: `id-${session}`, from: 'x@c.us', to: 'me@c.us', fromMe: false, body: 'hi' },
+  })
+
+  test('each session forwards to its own target', async () => {
+    const { pedro, alex } = twoSinks()
+    harness = await startHarness({
+      config: { webhookTargets: { pedro: pedro.url, alex: alex.url } },
+    })
+
+    expect((await post(message('pedro'))).status).toBe(200)
+    expect((await post(message('alex'))).status).toBe(200)
+
+    expect(pedro.received).toHaveLength(1)
+    expect(alex.received).toHaveLength(1)
+    expect(JSON.parse(pedro.received[0]!.body).session).toBe('pedro')
+    expect(JSON.parse(alex.received[0]!.body).session).toBe('alex')
+  })
+
+  test('a session outside the map falls back to the single target', async () => {
+    const { pedro, alex } = twoSinks()
+    harness = await startHarness({
+      config: { webhookTarget: alex.url, webhookTargets: { pedro: pedro.url } },
+    })
+
+    expect((await post(message('vanessa'))).status).toBe(200)
+    expect(alex.received).toHaveLength(1)
+    expect(pedro.received).toHaveLength(0)
+  })
+
+  test('an unmapped session with no fallback is refused, so WAHA retries', async () => {
+    const { pedro } = twoSinks()
+    harness = await startHarness({
+      config: { webhookTarget: null, webhookTargets: { pedro: pedro.url } },
+    })
+
+    // 502, not 200: acknowledging this would drop one account's entire inbound while the
+    // other lines kept working, and nothing would look wrong.
+    const res = await post(message('vanessa'))
+    expect(res.status).toBe(502)
+    expect(pedro.received).toHaveLength(0)
+  })
+
+  test('observe-only is still a quiet 200 when nothing is configured at all', async () => {
+    harness = await startHarness({ config: { webhookTarget: null, webhookTargets: {} } })
+    const res = await post(message('pedro'))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true, forwarded: false })
   })
 })

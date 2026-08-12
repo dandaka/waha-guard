@@ -90,12 +90,34 @@ In the reference compose file WAHA publishes **no port**, so the guard is the on
 that can reach it. That is what stops an app from quietly bypassing the guard by talking to
 WAHA directly.
 
+### Multi-session
+
+One WAHA container can hold several sessions, and one guard fronts all of them. Pacing,
+warmup, opt-outs and contact state are already per-session — every table in the state file
+is keyed by session name, and `policy.yml` takes per-session overrides under `sessions:`.
+
+The one thing that needs telling apart is **inbound**. WAHA posts every session's events to
+the same webhook URL, so if your app distinguishes accounts by the URL it was called on
+(`?account=…`), give each session its own target:
+
+```yaml
+GUARD_WEBHOOK_TARGETS: >
+  {"pedro":"https://app.example.com/webhook?account=pedro",
+   "alex":"https://app.example.com/webhook?account=alex"}
+```
+
+The session is read from the event payload, not the request path. A session not listed
+falls back to `GUARD_WEBHOOK_TARGET`; if there is no fallback either, the guard answers
+**502 rather than 200** so WAHA retries and the gap shows up in the log — acknowledging it
+would drop that one account's inbound while every other line looked healthy.
+
 ### Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `GUARD_UPSTREAM` | *(required)* | WAHA's base URL, e.g. `http://waha:3000` |
 | `GUARD_WEBHOOK_TARGET` | — | Where webhooks are forwarded. Unset means observe-only. |
+| `GUARD_WEBHOOK_TARGETS` | — | JSON `{"session":"url"}` — per-session targets when one WAHA holds several sessions. See [Multi-session](#multi-session). |
 | `GUARD_WEBHOOK_PATH` | `/_guard/webhook` | Path WAHA posts to |
 | `GUARD_POLICY` | — | Path to `policy.yml`. Unset means the `conservative` preset. |
 | `GUARD_STATE` | `/var/lib/guard/guard.sqlite` | SQLite state file |

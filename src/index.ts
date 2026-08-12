@@ -45,14 +45,21 @@ async function main(): Promise<void> {
     url: `http://${server.hostname}:${server.port}`,
     upstream: config.upstream,
     webhookTarget: config.webhookTarget,
+    webhookTargets: config.webhookTargets,
     webhookPath: config.webhookPath,
     preset: policy.preset,
     state: config.statePath,
   })
-  if (!config.webhookTarget) {
+  if (!config.webhookTarget && Object.keys(config.webhookTargets).length === 0) {
     log.warn(
       'GUARD_WEBHOOK_TARGET is not set — the guard will observe webhooks but forward nothing',
     )
+  } else if (!config.webhookTarget) {
+    // Worth saying out loud: with a map and no fallback, a session nobody listed forwards
+    // nowhere, and the first sign of it is an account that has simply gone quiet.
+    log.info('per-session webhook targets only — sessions outside this map will not forward', {
+      sessions: Object.keys(config.webhookTargets),
+    })
   }
   if (!policy.contacts.requireHumanTouch) {
     log.warn(

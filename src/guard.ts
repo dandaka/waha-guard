@@ -62,6 +62,7 @@ export class Guard {
     })
     this.downstream = new Downstream({
       target: options.config.webhookTarget,
+      targets: options.config.webhookTargets,
       timeoutMs: options.config.webhookTimeoutMs,
       log: this.log,
       metrics: this.metrics,
@@ -365,15 +366,22 @@ export class Guard {
   private async handleWebhook(req: Request): Promise<Response> {
     if (req.method !== 'POST') return this.guardError(405, 'guard.method_not_allowed', 'POST only')
     const raw = new Uint8Array(await req.arrayBuffer())
+    // The session decides which app endpoint this belongs to when one container holds
+    // several, so it is read from the payload rather than from the request path — WAHA
+    // posts every session's events to the same webhook URL.
+    let session: string | null = null
     try {
       const parsed = JSON.parse(new TextDecoder().decode(raw))
-      for (const event of parseEvents(parsed)) this.observer.handle(event)
+      for (const event of parseEvents(parsed)) {
+        session ??= event.session
+        this.observer.handle(event)
+      }
     } catch (error) {
       // Observation is best-effort; forwarding is not. A body we cannot read still belongs
       // to the app.
       this.log.warn('could not observe webhook body', { error: String(error) })
     }
-    return this.downstream.forward(req, raw)
+    return this.downstream.forward(req, raw, session)
   }
 
   private async handleGuardApi(req: Request, url: URL): Promise<Response> {
@@ -401,6 +409,7 @@ export class Guard {
       return Response.json({
         preset: this.policy.preset,
         webhookTarget: this.options.config.webhookTarget,
+        webhookTargets: this.options.config.webhookTargets,
         queueDepth: this.store.queuedDepth(),
         sessions: this.store.listSessions().map((s) => {
           const policy = forSession(this.policy, s.session)
