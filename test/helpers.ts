@@ -110,6 +110,7 @@ export function testConfig(overrides: Partial<GuardConfig> = {}): GuardConfig {
     hostname: '127.0.0.1',
     upstream: 'http://127.0.0.1:1',
     webhookTarget: null,
+    webhookTargets: {},
     webhookPath: '/_guard/webhook',
     statePath: ':memory:',
     policyPath: null,
