@@ -16,6 +16,8 @@ export interface GuardConfig {
    * would arrive labelled as whichever one the URL names.
    */
   webhookTargets: Record<string, string>
+  /** Bracos mailbox endpoint notified whenever the guard learns an opt-out. */
+  optOutCallbackUrl: string | null
   webhookPath: string
   statePath: string
   policyPath: string | null
@@ -99,6 +101,8 @@ export function readConfig(env: Record<string, string | undefined> = process.env
   requireHttpUrl('GUARD_UPSTREAM', upstream)
   const target = env.GUARD_WEBHOOK_TARGET ?? null
   if (target) requireHttpUrl('GUARD_WEBHOOK_TARGET', target)
+  const optOutCallbackUrl = env.GUARD_OPT_OUT_CALLBACK_URL ?? null
+  if (optOutCallbackUrl) requireHttpUrl('GUARD_OPT_OUT_CALLBACK_URL', optOutCallbackUrl)
 
   const logLevel = env.GUARD_LOG_LEVEL ?? 'info'
   if (!['debug', 'info', 'warn', 'error'].includes(logLevel)) {
@@ -113,6 +117,7 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     upstream: upstream.replace(/\/+$/, ''),
     webhookTarget: target,
     webhookTargets: readWebhookTargets(env),
+    optOutCallbackUrl,
     webhookPath: env.GUARD_WEBHOOK_PATH ?? '/_guard/webhook',
     statePath: env.GUARD_STATE ?? '/var/lib/guard/guard.sqlite',
     policyPath: env.GUARD_POLICY ?? null,

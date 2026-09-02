@@ -111,6 +111,7 @@ export function testConfig(overrides: Partial<GuardConfig> = {}): GuardConfig {
     upstream: 'http://127.0.0.1:1',
     webhookTarget: null,
     webhookTargets: {},
+    optOutCallbackUrl: null,
     webhookPath: '/_guard/webhook',
     statePath: ':memory:',
     policyPath: null,

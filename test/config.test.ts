@@ -32,6 +32,13 @@ describe('config', () => {
     expect(config.statePath).toBe('/var/lib/guard/guard.sqlite')
     expect(config.webhookTarget).toBeNull()
     expect(config.webhookTargets).toEqual({})
+    expect(config.optOutCallbackUrl).toBeNull()
+  })
+
+  test('rejects an invalid opt-out callback before any consent event is lost', () => {
+    expect(() =>
+      readConfig({ GUARD_UPSTREAM: 'http://waha:3000', GUARD_OPT_OUT_CALLBACK_URL: 'nope' }),
+    ).toThrow(/GUARD_OPT_OUT_CALLBACK_URL/)
   })
 })
 

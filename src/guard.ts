@@ -84,6 +84,7 @@ export class Guard {
       metrics: this.metrics,
       echoConfirmMs: options.echoConfirmMs,
       resolveLid: (session, lid) => this.resolveLid(session, lid),
+      reportOptOut: (event) => this.reportOptOut(event),
     })
     this.worker = new QueueWorker({
       store: this.store,
@@ -469,6 +470,12 @@ export class Guard {
         : this.guardError(404, 'guard.unknown_contact', 'no state recorded for this contact')
     }
 
+    // A bounded, authenticated snapshot for mailbox reconciliation. It is intentionally
+    // read-only: the guard owns observation and the app owns its durable projection.
+    if (req.method === 'GET' && path === '/_guard/opt-outs') {
+      return Response.json({ optOuts: this.store.listOptOuts() })
+    }
+
     if (path.startsWith('/_guard/queue/')) {
       const row = this.store.getQueued(path.slice('/_guard/queue/'.length))
       if (!row) return this.guardError(404, 'guard.unknown_queue_id', 'no such queued send')
@@ -480,12 +487,26 @@ export class Guard {
       const body = (await req.json().catch(() => null)) as {
         session?: string
         chatId?: string
+        eventId?: string
       } | null
       const session = body?.session ?? 'default'
       const chatId = body?.chatId
       if (!chatId) return this.guardError(400, 'guard.bad_request', 'chatId is required')
-      if (path === '/_guard/opt-out') this.store.markOptOut(session, chatId, this.clock.now())
-      else this.store.clearOptOut(session, chatId)
+      if (path === '/_guard/opt-out') {
+        const now = this.clock.now()
+        this.store.markOptOut(session, chatId, now)
+        void this.reportOptOut({
+          eventId:
+            body?.eventId && typeof body.eventId === 'string'
+              ? body.eventId
+              : `manual:${session}:${chatId}:${now}`,
+          session,
+          chatId,
+          occurredAt: new Date(now).toISOString(),
+        }).catch((error) =>
+          this.log.error('opt-out callback failed', { session, chatId, error: String(error) }),
+        )
+      } else this.store.clearOptOut(session, chatId)
       return Response.json({
         guard: true,
         session,
@@ -608,6 +629,31 @@ export class Guard {
     }
 
     return this.guardError(404, 'guard.not_found', `no guard endpoint at ${path}`)
+  }
+
+  /**
+   * The callback is deliberately best-effort: an outage must never clear or weaken the
+   * guard's local stop. The mailbox reconciler repairs any callback delivery gap.
+   */
+  private async reportOptOut(event: {
+    eventId: string
+    session: string
+    chatId: string
+    occurredAt: string
+  }): Promise<void> {
+    const target = this.options.config.optOutCallbackUrl
+    if (!target) return
+    if (!this.options.config.apiKey) {
+      this.log.error('opt-out callback is configured without GUARD_API_KEY', { target })
+      return
+    }
+    const response = await fetch(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': this.options.config.apiKey },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(this.options.config.webhookTimeoutMs),
+    })
+    if (!response.ok) throw new Error(`callback returned ${response.status}`)
   }
 }
 

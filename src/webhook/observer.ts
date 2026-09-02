@@ -40,6 +40,13 @@ export interface ObserverDeps {
    * under its own name rather than dropped.
    */
   resolveLid?: (session: string, lid: string) => Promise<string | null>
+  /** Best-effort durable projection into the application which decides eligibility. */
+  reportOptOut?: (event: {
+    eventId: string
+    session: string
+    chatId: string
+    occurredAt: string
+  }) => Promise<void>
 }
 
 const DEFAULT_ECHO_CONFIRM_MS = 5_000
@@ -195,7 +202,7 @@ export class Observer {
       const fresh = store.recordInbound(event.session, chatId, message.ids[0] ?? null, now)
       if (!fresh) return
       this.deps.metrics.inc('inbound_total', { session: event.session })
-      this.checkOptOut(event.session, chatId, message.body, now)
+      this.checkOptOut(event.session, chatId, message.body, now, message.ids[0] ?? null)
       return
     }
 
@@ -233,7 +240,13 @@ export class Observer {
     this.timers.add(timer)
   }
 
-  private checkOptOut(session: string, chatId: string, body: string, now: number): void {
+  private checkOptOut(
+    session: string,
+    chatId: string,
+    body: string,
+    now: number,
+    messageId: string | null,
+  ): void {
     const policy = forSession(this.deps.policy(), session)
     if (!policy.optOut.enabled || !body) return
     // One member typing "stop" is not the group asking to be muted, and treating it that way
@@ -244,6 +257,17 @@ export class Observer {
     this.deps.store.markOptOut(session, chatId, now)
     this.deps.metrics.inc('opt_outs_total', { session })
     this.deps.log.info('opt-out recorded', { session, chatId })
+    const eventId = messageId ?? `webhook:${session}:${chatId}:${now}`
+    void this.deps
+      .reportOptOut?.({
+        eventId,
+        session,
+        chatId,
+        occurredAt: new Date(now).toISOString(),
+      })
+      .catch((error) =>
+        this.deps.log.error('opt-out callback failed', { session, chatId, error: String(error) }),
+      )
   }
 
   private onAck(event: WahaEvent): void {

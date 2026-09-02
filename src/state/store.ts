@@ -405,6 +405,15 @@ export class Store {
       .run(session, this.resolveChatId(session, chatId))
   }
 
+  /** Read-only reconciliation surface; callers must never infer consent from absence. */
+  listOptOuts(): Pick<ContactRow, 'session' | 'chat_id' | 'opted_out_at'>[] {
+    return this.db
+      .query(
+        "SELECT session, chat_id, opted_out_at FROM contacts WHERE state = 'opted_out' ORDER BY session, chat_id",
+      )
+      .all() as Pick<ContactRow, 'session' | 'chat_id' | 'opted_out_at'>[]
+  }
+
   /** Returns false if this message id was already recorded — webhooks get redelivered. */
   recordInbound(session: string, chatId: string, msgId: string | null, now: number): boolean {
     return this.db.transaction(() => {

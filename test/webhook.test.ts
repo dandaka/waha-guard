@@ -167,6 +167,37 @@ describe('opt-out', () => {
     expect(harness.store.getContact('default', 'a@c.us')!.state).toBe('opted_out')
   })
 
+  test('lists opted-out contacts for authenticated reconciliation', async () => {
+    harness = await startHarness({
+      policy: { optOut: { enabled: true } },
+      config: { apiKey: 'key' },
+    })
+    await post(inbound('a@c.us', 'STOP'))
+    const res = await harness.guard.fetch(
+      new Request('http://guard.local/_guard/opt-outs', { headers: { 'x-api-key': 'key' } }),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ optOuts: [{ session: 'default', chat_id: 'a@c.us' }] })
+  })
+
+  test('projects an observed opt-out to the app with a stable webhook event id', async () => {
+    const callback = startWebhookSink()
+    harness = await startHarness({
+      policy: { optOut: { enabled: true } },
+      config: { optOutCallbackUrl: callback.url, apiKey: 'guard-secret' },
+    })
+    await post(inbound('a@c.us', 'STOP', 'opt-out-message'))
+    await Bun.sleep(1)
+    expect(callback.received).toHaveLength(1)
+    expect(callback.received[0]!.headers['x-api-key']).toBe('guard-secret')
+    expect(JSON.parse(callback.received[0]!.body)).toMatchObject({
+      eventId: 'opt-out-message',
+      session: 'default',
+      chatId: 'a@c.us',
+    })
+    await callback.stop()
+  })
+
   test('punctuation and casing do not hide an opt-out', async () => {
     harness = await startHarness({ policy: { optOut: { enabled: true } } })
     await post(inbound('a@c.us', '  Unsubscribe!  '))
