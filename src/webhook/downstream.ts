@@ -4,8 +4,10 @@ import type { Metrics } from '../observability/metrics.ts'
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'host'])
 
 export interface DownstreamOptions {
-  /** Where WAHA's webhooks (and the guard's own events) are forwarded. */
+  /** Fallback for any session not named in `targets`. */
   target: string | null
+  /** Per-session overrides, for a WAHA container holding more than one session. */
+  targets?: Record<string, string>
   timeoutMs: number
   log: Logger
   metrics: Metrics
@@ -22,13 +24,39 @@ export class Downstream {
   constructor(private readonly options: DownstreamOptions) {}
 
   get configured(): boolean {
-    return this.options.target !== null
+    return this.options.target !== null || Object.keys(this.options.targets ?? {}).length > 0
   }
 
-  async forward(req: Request, body: Uint8Array): Promise<Response> {
-    const { target, timeoutMs, log, metrics } = this.options
+  /**
+   * Where a given session's events go. `null` means observe-only.
+   *
+   * A session absent from `targets` falls back to the single `target` — which keeps the
+   * single-session deployment working unchanged, and is the right default when one app
+   * endpoint serves every line.
+   */
+  targetFor(session: string | null): string | null {
+    const { target, targets } = this.options
+    if (session && targets && Object.hasOwn(targets, session)) return targets[session]!
+    return target
+  }
+
+  async forward(req: Request, body: Uint8Array, session: string | null = null): Promise<Response> {
+    const { timeoutMs, log, metrics } = this.options
+    const target = this.targetFor(session)
     if (!target) {
-      // No downstream configured: the guard still observed the event, and saying 200 is
+      if (this.configured) {
+        // Targets exist but none covers this session. Saying 200 here would silently drop
+        // one account's entire inbound while the other lines look healthy — the failure is
+        // invisible precisely because the container is shared. 502 makes WAHA retry and
+        // puts it in the log.
+        metrics.inc('webhook_forward_errors_total')
+        log.error('no webhook target for session — refusing so WAHA retries', { session })
+        return Response.json(
+          { ok: false, error: `no webhook target configured for session ${session}` },
+          { status: 502 },
+        )
+      }
+      // Nothing configured at all: the guard still observed the event, and saying 200 is
       // honest — we accepted it.
       return Response.json({ ok: true, forwarded: false })
     }
@@ -57,8 +85,14 @@ export class Downstream {
 
   /** Guard-originated events: `guard.sent`, `guard.dropped`. */
   async emit(event: string, session: string, payload: Record<string, unknown>): Promise<void> {
-    const { target, timeoutMs, log, metrics } = this.options
-    if (!target) return
+    const { timeoutMs, log, metrics } = this.options
+    const target = this.targetFor(session)
+    if (!target) {
+      // Unlike `forward`, there is no upstream to retry a guard event — so an unroutable
+      // one is logged and dropped rather than silently discarded.
+      if (this.configured) log.error('no webhook target for guard event', { event, session })
+      return
+    }
     try {
       await fetch(target, {
         method: 'POST',

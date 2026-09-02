@@ -31,6 +31,45 @@ describe('config', () => {
     expect(config.webhookPath).toBe('/_guard/webhook')
     expect(config.statePath).toBe('/var/lib/guard/guard.sqlite')
     expect(config.webhookTarget).toBeNull()
+    expect(config.webhookTargets).toEqual({})
+    expect(config.optOutCallbackUrl).toBeNull()
+  })
+
+  test('rejects an invalid opt-out callback before any consent event is lost', () => {
+    expect(() =>
+      readConfig({ GUARD_UPSTREAM: 'http://waha:3000', GUARD_OPT_OUT_CALLBACK_URL: 'nope' }),
+    ).toThrow(/GUARD_OPT_OUT_CALLBACK_URL/)
+  })
+})
+
+describe('per-session webhook targets', () => {
+  const base = { GUARD_UPSTREAM: 'http://waha:3000' }
+
+  test('parses a session -> URL map', () => {
+    const config = readConfig({
+      ...base,
+      GUARD_WEBHOOK_TARGETS: '{"pedro":"https://app/hook?account=pedro","alex":"https://app/h2"}',
+    })
+    expect(config.webhookTargets).toEqual({
+      pedro: 'https://app/hook?account=pedro',
+      alex: 'https://app/h2',
+    })
+  })
+
+  test('a malformed map fails at boot, not on the first inbound message', () => {
+    expect(() => readConfig({ ...base, GUARD_WEBHOOK_TARGETS: '{oops' })).toThrow(/not valid JSON/)
+    expect(() => readConfig({ ...base, GUARD_WEBHOOK_TARGETS: '["a"]' })).toThrow(
+      /must be a JSON object/,
+    )
+    expect(() => readConfig({ ...base, GUARD_WEBHOOK_TARGETS: '{"pedro":5}' })).toThrow(
+      /must be a string URL/,
+    )
+  })
+
+  test('a typo in one session URL is caught by name', () => {
+    expect(() => readConfig({ ...base, GUARD_WEBHOOK_TARGETS: '{"pedro":"waha:3000"}' })).toThrow(
+      /GUARD_WEBHOOK_TARGETS\["pedro"\]/,
+    )
   })
 })
 

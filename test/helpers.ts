@@ -110,6 +110,8 @@ export function testConfig(overrides: Partial<GuardConfig> = {}): GuardConfig {
     hostname: '127.0.0.1',
     upstream: 'http://127.0.0.1:1',
     webhookTarget: null,
+    webhookTargets: {},
+    optOutCallbackUrl: null,
     webhookPath: '/_guard/webhook',
     statePath: ':memory:',
     policyPath: null,
@@ -149,6 +151,7 @@ export interface HarnessOptions {
   log?: Logger
   echoConfirmMs?: number
   config?: Partial<GuardConfig>
+  startMonitor?: boolean
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -165,6 +168,9 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     rng: options.rng ?? (() => 0.5),
     echoConfirmMs: options.echoConfirmMs ?? 0,
     startWorker: false,
+    // Both background loops are driven by hand in tests. The monitor also polls WAHA the
+    // moment it starts, which would otherwise show up in every `waha.requests` assertion.
+    startMonitor: options.startMonitor ?? false,
   })
   return {
     guard,

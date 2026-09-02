@@ -54,6 +54,16 @@ const touch = (chatId: string) =>
     sendRequest('/_guard/contact/human-touch', { session: 'default', chatId }, { method: 'POST' }),
   )
 
+/** Adopt an inbound the guard never saw — `at` is when they actually wrote. */
+const adoptInbound = (chatId: string, at?: number) =>
+  harness.guard.fetch(
+    sendRequest(
+      '/_guard/contact/inbound',
+      { session: 'default', chatId, ...(at ? { at } : {}) },
+      { method: 'POST' },
+    ),
+  )
+
 /** Someone writes in. `alt` is the GOWS alt JID that resolves the LID to a phone. */
 function inbound(from: string, id: string, alt?: string): Request {
   return webhookRequest([
@@ -169,6 +179,44 @@ describe('inbound does not consume the cold-outreach budget', () => {
 
     await touch('351999999999@c.us')
     expect((await sendText('351999999999@c.us')).status).toBe(429)
+  })
+
+  /**
+   * The 2026-08-01 regression, pinned.
+   *
+   * A recovery that adopts webhooks the guard never saw used to mark the contacts as
+   * *touched*, which is the cold-send unlock. Fifteen CTWA ad leads cleared
+   * `requireHumanTouch` and were then held by the stranger budget five at a time, because
+   * nothing had recorded that they wrote first.
+   */
+  test('an adopted inbound answers "who contacted whom", unlike a touch', async () => {
+    harness = await budgetHarness({
+      contacts: { requireHumanTouch: true, maxNewStrangersPerDay: 1, handshakeMaxMessages: 1 },
+    })
+    await adoptInbound(PHONE)
+    expect((await sendText(PHONE)).status).toBe(200)
+    // They wrote first, so answering them is not us opening a stranger.
+    expect(spentToday()).toBe(0)
+
+    // And the budget it did not spend is still there for genuine cold outreach.
+    await touch('351999999999@c.us')
+    expect((await sendText('351999999999@c.us')).status).toBe(200)
+    expect(spentToday()).toBe(1)
+  })
+
+  test('an adopted inbound is dated when they wrote, so it un-charges a send already made', async () => {
+    // `coldOpens` compares the inbound row against the *first send* to that chat. A row
+    // stamped `now` sits after the send that already went out and leaves it charged — which
+    // is exactly how the held replies stayed held.
+    harness = await budgetHarness({
+      contacts: { requireHumanTouch: true, maxNewStrangersPerDay: 5, handshakeMaxMessages: 9 },
+    })
+    await touch(PHONE)
+    await sendText(PHONE)
+    expect(spentToday()).toBe(1)
+
+    await adoptInbound(PHONE, harness.clock.now() - 60 * 60 * 1000)
+    expect(spentToday()).toBe(0)
   })
 
   test('a day of group job posts leaves the budget for people', async () => {

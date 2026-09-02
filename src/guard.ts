@@ -12,6 +12,7 @@ import { Store } from './state/store.ts'
 import { type Clock, systemClock } from './util/clock.ts'
 import type { Rng } from './util/random.ts'
 import { chatIdFromSendBody, sessionFromSendBody, textFromSendBody } from './waha/message.ts'
+import { SessionMonitor } from './waha/session-health.ts'
 import { Downstream } from './webhook/downstream.ts'
 import { Observer, parseEvents } from './webhook/observer.ts'
 
@@ -25,6 +26,8 @@ export interface GuardOptions {
   echoConfirmMs?: number
   /** Queue mode drains in-process; tests drive it by hand instead. */
   startWorker?: boolean
+  /** Session polling talks to WAHA on a timer; tests call `monitor.pollOnce()` instead. */
+  startMonitor?: boolean
 }
 
 interface GuardErrorBody {
@@ -41,6 +44,7 @@ export class Guard {
   readonly observer: Observer
   readonly downstream: Downstream
   readonly worker: QueueWorker
+  readonly monitor: SessionMonitor
   private readonly upstream: Upstream
   private readonly log: Logger
   private readonly clock: Clock
@@ -58,6 +62,7 @@ export class Guard {
     })
     this.downstream = new Downstream({
       target: options.config.webhookTarget,
+      targets: options.config.webhookTargets,
       timeoutMs: options.config.webhookTimeoutMs,
       log: this.log,
       metrics: this.metrics,
@@ -79,6 +84,7 @@ export class Guard {
       metrics: this.metrics,
       echoConfirmMs: options.echoConfirmMs,
       resolveLid: (session, lid) => this.resolveLid(session, lid),
+      reportOptOut: (event) => this.reportOptOut(event),
     })
     this.worker = new QueueWorker({
       store: this.store,
@@ -88,8 +94,18 @@ export class Guard {
       metrics: this.metrics,
       downstream: this.downstream,
     })
+    this.monitor = new SessionMonitor({
+      store: this.store,
+      upstream: this.upstream,
+      policy: () => this.policy,
+      clock: this.clock,
+      log: this.log,
+      metrics: this.metrics,
+      apiKey: options.config.upstreamApiKey,
+    })
     this.registerGauges()
     if (options.startWorker !== false) this.worker.start()
+    if (options.startMonitor !== false) this.monitor.start()
   }
 
   setPolicy(policy: Policy): void {
@@ -97,6 +113,7 @@ export class Guard {
   }
 
   async close(): Promise<void> {
+    this.monitor.stop()
     await this.worker.stop()
     this.observer.close()
     this.store.close()
@@ -350,15 +367,22 @@ export class Guard {
   private async handleWebhook(req: Request): Promise<Response> {
     if (req.method !== 'POST') return this.guardError(405, 'guard.method_not_allowed', 'POST only')
     const raw = new Uint8Array(await req.arrayBuffer())
+    // The session decides which app endpoint this belongs to when one container holds
+    // several, so it is read from the payload rather than from the request path — WAHA
+    // posts every session's events to the same webhook URL.
+    let session: string | null = null
     try {
       const parsed = JSON.parse(new TextDecoder().decode(raw))
-      for (const event of parseEvents(parsed)) this.observer.handle(event)
+      for (const event of parseEvents(parsed)) {
+        session ??= event.session
+        this.observer.handle(event)
+      }
     } catch (error) {
       // Observation is best-effort; forwarding is not. A body we cannot read still belongs
       // to the app.
       this.log.warn('could not observe webhook body', { error: String(error) })
     }
-    return this.downstream.forward(req, raw)
+    return this.downstream.forward(req, raw, session)
   }
 
   private async handleGuardApi(req: Request, url: URL): Promise<Response> {
@@ -386,6 +410,7 @@ export class Guard {
       return Response.json({
         preset: this.policy.preset,
         webhookTarget: this.options.config.webhookTarget,
+        webhookTargets: this.options.config.webhookTargets,
         queueDepth: this.store.queuedDepth(),
         sessions: this.store.listSessions().map((s) => {
           const policy = forSession(this.policy, s.session)
@@ -394,6 +419,19 @@ export class Guard {
           return {
             session: s.session,
             stopped: s.stopped_reason,
+            // A stop that is still inside the grace window is a reconnect in progress, not
+            // an outage — the difference decides whether sends are waiting or failing, and
+            // it is the first thing anyone opening this endpoint wants to know.
+            stoppedStatus: s.stopped_status,
+            stoppedSince: s.stopped_since,
+            stoppedKind:
+              s.stopped_reason === null
+                ? null
+                : s.stopped_since !== null &&
+                    now - s.stopped_since < policy.sessionHealth.transientGraceMs &&
+                    (s.stopped_status === 'STOPPED' || s.stopped_status === 'STARTING')
+                  ? 'reconnecting'
+                  : 'outage',
             degradedUntil: s.timelock_until && s.timelock_until > now ? s.timelock_until : null,
             rateMultiplier: s.rate_multiplier,
             warmupDay: Math.floor((now - s.warmup_started_at) / 86_400_000),
@@ -432,6 +470,12 @@ export class Guard {
         : this.guardError(404, 'guard.unknown_contact', 'no state recorded for this contact')
     }
 
+    // A bounded, authenticated snapshot for mailbox reconciliation. It is intentionally
+    // read-only: the guard owns observation and the app owns its durable projection.
+    if (req.method === 'GET' && path === '/_guard/opt-outs') {
+      return Response.json({ optOuts: this.store.listOptOuts() })
+    }
+
     if (path.startsWith('/_guard/queue/')) {
       const row = this.store.getQueued(path.slice('/_guard/queue/'.length))
       if (!row) return this.guardError(404, 'guard.unknown_queue_id', 'no such queued send')
@@ -443,12 +487,26 @@ export class Guard {
       const body = (await req.json().catch(() => null)) as {
         session?: string
         chatId?: string
+        eventId?: string
       } | null
       const session = body?.session ?? 'default'
       const chatId = body?.chatId
       if (!chatId) return this.guardError(400, 'guard.bad_request', 'chatId is required')
-      if (path === '/_guard/opt-out') this.store.markOptOut(session, chatId, this.clock.now())
-      else this.store.clearOptOut(session, chatId)
+      if (path === '/_guard/opt-out') {
+        const now = this.clock.now()
+        this.store.markOptOut(session, chatId, now)
+        void this.reportOptOut({
+          eventId:
+            body?.eventId && typeof body.eventId === 'string'
+              ? body.eventId
+              : `manual:${session}:${chatId}:${now}`,
+          session,
+          chatId,
+          occurredAt: new Date(now).toISOString(),
+        }).catch((error) =>
+          this.log.error('opt-out callback failed', { session, chatId, error: String(error) }),
+        )
+      } else this.store.clearOptOut(session, chatId)
       return Response.json({
         guard: true,
         session,
@@ -486,6 +544,49 @@ export class Guard {
         already: already.length,
       })
       return Response.json({ guard: true, session, marked, already })
+    }
+
+    /**
+     * Tell the guard that **they wrote to us**, at a time it was not there to see.
+     *
+     * Distinct from `/contact/human-touch`, and the distinction is the whole point. A touch
+     * says only "this relationship is not cold" — it is how a *permitted cold send* gets
+     * unlocked, so `opensAStranger` deliberately refuses to key on it (see the comment
+     * there). Using a touch to represent an inbound therefore clears `requireHumanTouch`
+     * and then walks the contact straight into `maxNewStrangersPerDay`, because as far as
+     * every counter can tell we are still the ones opening the conversation.
+     *
+     * That is not hypothetical: on 2026-08-01 fifteen people answered a CTWA ad, WAHA never
+     * delivered the webhooks, and the recovery marked them all as touched. The replies
+     * cleared one gate and were then held by the stranger budget, five per day.
+     *
+     * This records the real thing instead. `recordInbound` bumps `in_count`, which is what
+     * `opensAStranger` reads, and inserts an `inbound` row — which is what `coldOpens` reads,
+     * and it compares that row's timestamp against the first send to the chat. So `at` must
+     * be **when they actually wrote**, not now: a row dated after a send that already went
+     * out still leaves that send counted as a cold open.
+     */
+    if (req.method === 'POST' && path === '/_guard/contact/inbound') {
+      const body = (await req.json().catch(() => null)) as {
+        session?: string
+        chatId?: string
+        msgId?: string
+        at?: number
+      } | null
+      const session = body?.session ?? 'default'
+      const chatId = body?.chatId
+      if (!chatId) return this.guardError(400, 'guard.bad_request', 'chatId is required')
+      const at = typeof body?.at === 'number' && body.at > 0 ? body.at : this.clock.now()
+
+      const recorded = this.store.recordInbound(session, chatId, body?.msgId ?? null, at)
+      if (recorded) this.log.info('inbound adopted', { session, chatId, at })
+      return Response.json({
+        guard: true,
+        session,
+        chatId,
+        recorded,
+        contact: this.store.getContact(session, chatId),
+      })
     }
 
     /**
@@ -528,6 +629,31 @@ export class Guard {
     }
 
     return this.guardError(404, 'guard.not_found', `no guard endpoint at ${path}`)
+  }
+
+  /**
+   * The callback is deliberately best-effort: an outage must never clear or weaken the
+   * guard's local stop. The mailbox reconciler repairs any callback delivery gap.
+   */
+  private async reportOptOut(event: {
+    eventId: string
+    session: string
+    chatId: string
+    occurredAt: string
+  }): Promise<void> {
+    const target = this.options.config.optOutCallbackUrl
+    if (!target) return
+    if (!this.options.config.apiKey) {
+      this.log.error('opt-out callback is configured without GUARD_API_KEY', { target })
+      return
+    }
+    const response = await fetch(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': this.options.config.apiKey },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(this.options.config.webhookTimeoutMs),
+    })
+    if (!response.ok) throw new Error(`callback returned ${response.status}`)
   }
 }
 

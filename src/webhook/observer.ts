@@ -5,7 +5,15 @@ import type { Policy } from '../policy/schema.ts'
 import type { Store } from '../state/store.ts'
 import type { Clock } from '../util/clock.ts'
 import { isLidChatId, phoneChatIdFromJid } from '../waha/identity.ts'
-import { ackLevel, isGroupChatId, type ObservedMessage, observeMessage } from '../waha/message.ts'
+import {
+  ackLevel,
+  INTERACTION_EVENTS,
+  isGroupChatId,
+  type ObservedMessage,
+  observeInteraction,
+  observeMessage,
+} from '../waha/message.ts'
+import { applySessionStatus } from '../waha/session-health.ts'
 
 export interface WahaEvent {
   event: string
@@ -32,6 +40,13 @@ export interface ObserverDeps {
    * under its own name rather than dropped.
    */
   resolveLid?: (session: string, lid: string) => Promise<string | null>
+  /** Best-effort durable projection into the application which decides eligibility. */
+  reportOptOut?: (event: {
+    eventId: string
+    session: string
+    chatId: string
+    occurredAt: string
+  }) => Promise<void>
 }
 
 const DEFAULT_ECHO_CONFIRM_MS = 5_000
@@ -92,8 +107,37 @@ export class Observer {
         this.onSessionStatus(event)
         break
       default:
+        if (INTERACTION_EVENTS.has(event.event)) this.onInteraction(event)
         break
     }
+  }
+
+  /**
+   * A call, a reaction, a poll vote, a deletion — something they did that is not a message.
+   *
+   * Recorded through `recordInbound`, the same path a message takes, because the three
+   * things it writes are all true of an interaction: `human_touch_at` (they have engaged
+   * with us, so a reply is not cold outreach), `state = known`, and `in_count`.
+   *
+   * `in_count` is the one worth pausing on, because two gates read it and this widens what
+   * it counts. `opensAStranger` uses it to decide whether a first send is us cold-opening
+   * someone — and a person who just rang us is not a stranger we chose off a list.
+   * `handshake` uses it to lift the unanswered-messages-per-day cap — and a 👍 on "consegue
+   * quinta às 8?" is an answer. Both readings stay true. Both also read it only as `> 0`
+   * versus `=== 0`, so an interaction that inflates the count (an edit of a message already
+   * counted, say) changes no decision.
+   */
+  private onInteraction(event: WahaEvent): void {
+    const { store, clock, log } = this.deps
+    const interaction = observeInteraction(event.event, event.payload)
+    // Ours: reacting to our own message says nothing about them.
+    if (!interaction || interaction.fromMe) return
+    const now = clock.now()
+    const chatId = this.identify(event.session, interaction, now)
+    if (!store.recordInbound(event.session, chatId, interaction.ids[0] ?? null, now)) return
+    this.deps.metrics.inc('inbound_total', { session: event.session })
+    this.deps.metrics.inc('interactions_total', { session: event.session, event: event.event })
+    log.info('interaction observed', { session: event.session, chatId, event: event.event })
   }
 
   /**
@@ -158,7 +202,7 @@ export class Observer {
       const fresh = store.recordInbound(event.session, chatId, message.ids[0] ?? null, now)
       if (!fresh) return
       this.deps.metrics.inc('inbound_total', { session: event.session })
-      this.checkOptOut(event.session, chatId, message.body, now)
+      this.checkOptOut(event.session, chatId, message.body, now, message.ids[0] ?? null)
       return
     }
 
@@ -196,7 +240,13 @@ export class Observer {
     this.timers.add(timer)
   }
 
-  private checkOptOut(session: string, chatId: string, body: string, now: number): void {
+  private checkOptOut(
+    session: string,
+    chatId: string,
+    body: string,
+    now: number,
+    messageId: string | null,
+  ): void {
     const policy = forSession(this.deps.policy(), session)
     if (!policy.optOut.enabled || !body) return
     // One member typing "stop" is not the group asking to be muted, and treating it that way
@@ -207,6 +257,17 @@ export class Observer {
     this.deps.store.markOptOut(session, chatId, now)
     this.deps.metrics.inc('opt_outs_total', { session })
     this.deps.log.info('opt-out recorded', { session, chatId })
+    const eventId = messageId ?? `webhook:${session}:${chatId}:${now}`
+    void this.deps
+      .reportOptOut?.({
+        eventId,
+        session,
+        chatId,
+        occurredAt: new Date(now).toISOString(),
+      })
+      .catch((error) =>
+        this.deps.log.error('opt-out callback failed', { session, chatId, error: String(error) }),
+      )
   }
 
   private onAck(event: WahaEvent): void {
@@ -221,27 +282,16 @@ export class Observer {
     }
   }
 
+  /**
+   * The fast path for session status. The slow path is `SessionMonitor`, which re-reads the
+   * same thing on an interval — because this one arrives over a webhook, and a webhook that
+   * fails to arrive used to leave the session latched off indefinitely. Both fold through
+   * `applySessionStatus` so they cannot disagree.
+   */
   private onSessionStatus(event: WahaEvent): void {
     const payload = event.payload as { status?: unknown } | null
-    const status = typeof payload?.status === 'string' ? payload.status.toUpperCase() : null
+    const status = typeof payload?.status === 'string' ? payload.status : null
     if (!status) return
-    const now = this.deps.clock.now()
-    // A session that is not WORKING cannot send; a session that FAILED or logged out is
-    // the shape of an account action, and the right move is to stop, loudly.
-    const halting = ['FAILED', 'STOPPED', 'SCAN_QR_CODE'].includes(status)
-    if (halting) {
-      this.deps.store.setStopped(event.session, `session status ${status}`, now)
-      this.deps.metrics.inc('session_halts_total', { session: event.session, status })
-      this.deps.log.error('session is not able to send — outbound stopped', {
-        session: event.session,
-        status,
-      })
-    } else if (status === 'WORKING') {
-      const existing = this.deps.store.getSession(event.session)
-      if (existing?.stopped_reason) {
-        this.deps.store.setStopped(event.session, null, now)
-        this.deps.log.info('session recovered — outbound resumed', { session: event.session })
-      }
-    }
+    applySessionStatus(this.deps, event.session, status, 'webhook')
   }
 }
