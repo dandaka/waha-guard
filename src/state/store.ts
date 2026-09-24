@@ -164,6 +164,8 @@ const MIGRATIONS: string[] = [
   // The dormant budget asks for the last inbound before each send. The existing
   // session/time index cannot seek one contact within a busy session.
   `CREATE INDEX inbound_contact_time ON inbound (session, chat_id, at);`,
+  `ALTER TABLE sends ADD COLUMN mailbox_message_id TEXT;
+   CREATE INDEX sends_mailbox_message ON sends (session, chat_id, mailbox_message_id);`,
 ]
 
 const STATE_RANK: Record<ContactState, number> = {
@@ -430,11 +432,11 @@ export class Store {
         .query(
           `UPDATE contacts
            SET in_count = in_count + 1,
-               last_in_at = ?,
+               last_in_at = MAX(COALESCE(last_in_at, ?), ?),
                human_touch_at = COALESCE(human_touch_at, ?)
            WHERE session = ? AND chat_id = ?`,
         )
-        .run(now, now, session, id)
+        .run(now, now, now, session, id)
       this.promoteContact(session, id, 'known', now)
       return true
     })()
@@ -474,6 +476,7 @@ export class Store {
     route: string,
     msgId: string | null,
     now: number,
+    mailboxMessageId: string | null = null,
   ): number {
     return this.db.transaction(() => {
       const id = this.resolveChatId(session, chatId)
@@ -486,10 +489,10 @@ export class Store {
       this.promoteContact(session, id, 'handshake_sent', now)
       const res = this.db
         .query(
-          `INSERT INTO sends (session, chat_id, msg_id, sent_at, route, origin)
-           VALUES (?, ?, ?, ?, ?, 'guard')`,
+          `INSERT INTO sends (session, chat_id, msg_id, sent_at, route, origin, mailbox_message_id)
+           VALUES (?, ?, ?, ?, ?, 'guard', ?)`,
         )
-        .run(session, id, msgId, now, route)
+        .run(session, id, msgId, now, route, mailboxMessageId)
       return Number(res.lastInsertRowid)
     })()
   }
@@ -619,9 +622,23 @@ export class Store {
    */
   countSendsToContactSince(session: string, chatId: string, since: number): number {
     const row = this.db
-      .query('SELECT COUNT(*) AS n FROM sends WHERE session = ? AND chat_id = ? AND sent_at > ?')
+      .query(`SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT mailbox_message_id IS NOT NULL AS has_mailbox_id,
+                        COALESCE(mailbox_message_id, CAST(id AS TEXT)) AS logical_id
+        FROM sends WHERE session = ? AND chat_id = ? AND sent_at >= ?
+      )`)
       .get(session, this.resolveChatId(session, chatId), since) as { n: number }
     return row.n
+  }
+
+  hasMailboxMessageSend(session: string, chatId: string, messageId: string): boolean {
+    return (
+      this.db
+        .query(
+          'SELECT 1 FROM sends WHERE session = ? AND chat_id = ? AND mailbox_message_id = ? LIMIT 1',
+        )
+        .get(session, this.resolveChatId(session, chatId), messageId) !== null
+    )
   }
 
   /** Distinct contacts sent to after their last inbound had gone stale at send time.
@@ -639,9 +656,12 @@ export class Store {
       SELECT COUNT(DISTINCT s.chat_id) AS n FROM sends s
       WHERE s.session = ? AND s.sent_at >= ?
         ${excludeGroups ? Store.notAGroup('s.chat_id') : ''}
-        AND (SELECT MAX(i.at) FROM inbound i
-             WHERE i.session = s.session AND i.chat_id = s.chat_id AND i.at <= s.sent_at)
-            <= s.sent_at - ?
+        AND (SELECT MAX(t.at) FROM (
+          SELECT i.at FROM inbound i WHERE i.session = s.session AND i.chat_id = s.chat_id AND i.at <= s.sent_at
+          UNION ALL
+          SELECT c.human_touch_at AS at FROM contacts c
+            WHERE c.session = s.session AND c.chat_id = s.chat_id AND c.human_touch_at <= s.sent_at
+        ) t) <= s.sent_at - ?
     `)
       .get(session, since, dormantMs) as { n: number }
     return row.n

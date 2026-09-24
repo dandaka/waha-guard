@@ -41,6 +41,8 @@ export interface SendContext {
    * never persisted — see `forceable` below and README "Forcing one send past a limit".
    */
   force: boolean
+  /** Mailbox row shared by all text, media and contact-card parts. */
+  mailboxMessageId?: string | null
 }
 
 export interface GateInputs {
@@ -235,11 +237,11 @@ function humanTouch(inputs: GateInputs): GateResult {
 
 function isDormant(inputs: GateInputs): boolean {
   const { contact, ctx, policy } = inputs
+  const lastTouch = Math.max(contact.last_in_at ?? 0, contact.human_touch_at ?? 0)
   return (
     !groupExempt(inputs) &&
-    contact.last_in_at !== null &&
-    (contact.in_count > 0 || contact.human_touch_at !== null) &&
-    contact.last_in_at <= ctx.now - policy.contacts.dormantAfterDays * DAY
+    lastTouch > 0 &&
+    lastTouch <= ctx.now - policy.contacts.dormantAfterDays * DAY
   )
 }
 
@@ -295,7 +297,14 @@ function reengagementBudget(inputs: GateInputs): GateResult {
 function handshake(inputs: GateInputs): GateResult {
   const { policy, store, contact, ctx } = inputs
   if (groupExempt(inputs)) return allow
-  if (contact.in_count > 0 && !isDormant(inputs)) return allow
+  const dormant = isDormant(inputs)
+  if (contact.in_count > 0 && !dormant) return allow
+  // A mailbox message may be sent as text plus several WAHA media requests.
+  if (
+    ctx.mailboxMessageId &&
+    store.hasMailboxMessageSend(ctx.session, ctx.chatId, ctx.mailboxMessageId)
+  )
+    return allow
   const timezone = policy.quietHours.timezone
   const sentToday = store.countSendsToContactSince(
     ctx.session,
@@ -309,7 +318,7 @@ function handshake(inputs: GateInputs): GateResult {
     status: 403,
     code: 'guard.handshake_exhausted',
     reason:
-      `${sentToday} message(s) sent today with no reply; limit is ` +
+      `${sentToday} message(s) sent today ${dormant ? 'without a recent reply' : 'with no reply'}; limit is ` +
       `${policy.contacts.handshakeMaxMessages} per day (${contact.out_count} sent in total). ` +
       `Resets at ${resets} — ${timezone} midnight.`,
   }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type { DeepPartial, SessionPolicy } from '../src/policy/schema.ts'
+import { startOfNextZonedDay } from '../src/util/time.ts'
 import { type Harness, sendRequest, startHarness } from './helpers.ts'
 
 const DAY = 86_400_000
@@ -126,5 +127,78 @@ describe('dormant re-engagement', () => {
     expect((await send('group@g.us')).status).toBe(200)
     harness.store.markHumanTouch('default', 'stranger@c.us', harness.clock.now())
     expect((await send('stranger@c.us')).status).toBe(200)
+  })
+
+  test('an old human touch without stored inbound is dormant', async () => {
+    harness = await startHarness({
+      policy: { ...policy, contacts: { ...policy.contacts, maxReengagementsPerDay: 0 } },
+    })
+    harness.store.markHumanTouch(
+      'default',
+      'historic@c.us',
+      harness.clock.now(),
+      harness.clock.now() - 30 * DAY,
+    )
+    const result = await send('historic@c.us')
+    expect(result.headers.get('x-guard-reason')).toBe('guard.reengagement_budget')
+  })
+
+  test('older adopted history cannot move the latest inbound backwards', async () => {
+    harness = await startHarness({
+      policy: { ...policy, contacts: { ...policy.contacts, maxReengagementsPerDay: 0 } },
+    })
+    inbound('active@c.us', 1)
+    inbound('active@c.us', 30)
+    expect((await send('active@c.us')).status).toBe(200)
+  })
+
+  test('several WAHA parts of one mailbox message spend one handshake send', async () => {
+    harness = await startHarness({ policy })
+    inbound('parts@c.us', 30)
+    const headers = { 'x-guard-mailbox-message-id': 'mailbox-row-1' }
+    expect((await send('parts@c.us', 'default', headers)).status).toBe(200)
+    expect(
+      (
+        await harness.guard.fetch(
+          sendRequest(
+            '/api/sendContactVcard',
+            { session: 'default', chatId: 'parts@c.us', contacts: [] },
+            { headers },
+          ),
+        )
+      ).status,
+    ).toBe(200)
+    expect(harness.waha.requests.find((r) => r.path === '/api/sendContactVcard')).toBeDefined()
+    expect(
+      harness.waha.requests.find((r) => r.path === '/api/sendContactVcard')?.headers[
+        'x-guard-mailbox-message-id'
+      ],
+    ).toBeUndefined()
+    expect(
+      harness.store.countSendsToContactSince('default', 'parts@c.us', harness.clock.now() - DAY),
+    ).toBe(1)
+    expect(
+      (
+        await send('parts@c.us', 'default', { 'x-guard-mailbox-message-id': 'mailbox-row-2' })
+      ).headers.get('x-guard-reason'),
+    ).toBe('guard.handshake_exhausted')
+  })
+
+  test('a send exactly at midnight spends the new day for both limits', async () => {
+    harness = await startHarness({
+      policy: { ...policy, contacts: { ...policy.contacts, maxReengagementsPerDay: 1 } },
+    })
+    inbound('midnight@c.us', 30)
+    await harness.clock.advance(
+      startOfNextZonedDay(harness.clock.now(), 'UTC') - harness.clock.now(),
+    )
+    expect((await send('midnight@c.us')).status).toBe(200)
+    expect((await send('midnight@c.us')).headers.get('x-guard-reason')).toBe(
+      'guard.handshake_exhausted',
+    )
+    inbound('second@c.us', 30)
+    expect((await send('second@c.us')).headers.get('x-guard-reason')).toBe(
+      'guard.reengagement_budget',
+    )
   })
 })
