@@ -184,6 +184,21 @@ describe('dormant re-engagement', () => {
     ).toBe('guard.handshake_exhausted')
   })
 
+  test('a mailbox message id only joins sends on the same day', async () => {
+    harness = await startHarness({ policy })
+    inbound('reused@c.us', 30)
+    const headers = { 'x-guard-mailbox-message-id': 'reused-id' }
+    expect((await send('reused@c.us', 'default', headers)).status).toBe(200)
+    await harness.clock.advance(DAY)
+    expect((await send('reused@c.us', 'default', headers)).status).toBe(200)
+    expect((await send('reused@c.us', 'default', headers)).status).toBe(200)
+    expect(
+      (
+        await send('reused@c.us', 'default', { 'x-guard-mailbox-message-id': 'new-id' })
+      ).headers.get('x-guard-reason'),
+    ).toBe('guard.handshake_exhausted')
+  })
+
   test('a send exactly at midnight spends the new day for both limits', async () => {
     harness = await startHarness({
       policy: { ...policy, contacts: { ...policy.contacts, maxReengagementsPerDay: 1 } },

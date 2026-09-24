@@ -631,13 +631,18 @@ export class Store {
     return row.n
   }
 
-  hasMailboxMessageSend(session: string, chatId: string, messageId: string): boolean {
+  hasMailboxMessageSend(
+    session: string,
+    chatId: string,
+    messageId: string,
+    since: number,
+  ): boolean {
     return (
       this.db
         .query(
-          'SELECT 1 FROM sends WHERE session = ? AND chat_id = ? AND mailbox_message_id = ? LIMIT 1',
+          'SELECT 1 FROM sends WHERE session = ? AND chat_id = ? AND mailbox_message_id = ? AND sent_at >= ? LIMIT 1',
         )
-        .get(session, this.resolveChatId(session, chatId), messageId) !== null
+        .get(session, this.resolveChatId(session, chatId), messageId, since) !== null
     )
   }
 

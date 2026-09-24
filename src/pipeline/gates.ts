@@ -302,7 +302,12 @@ function handshake(inputs: GateInputs): GateResult {
   // A mailbox message may be sent as text plus several WAHA media requests.
   if (
     ctx.mailboxMessageId &&
-    store.hasMailboxMessageSend(ctx.session, ctx.chatId, ctx.mailboxMessageId)
+    store.hasMailboxMessageSend(
+      ctx.session,
+      ctx.chatId,
+      ctx.mailboxMessageId,
+      startOfZonedDay(ctx.now, policy.quietHours.timezone),
+    )
   )
     return allow
   const timezone = policy.quietHours.timezone

@@ -532,8 +532,15 @@ describe('presence ownership', () => {
   test('when the caller owns presence its typing calls pass through', async () => {
     harness = await startHarness({ policy: { presence: 'caller' } })
     await harness.guard.fetch(
-      sendRequest('/api/startTyping', { session: 'default', chatId: 'a@c.us' }),
+      sendRequest(
+        '/api/startTyping',
+        { session: 'default', chatId: 'a@c.us' },
+        {
+          headers: { 'x-guard-mailbox-message-id': 'row-1' },
+        },
+      ),
     )
     expect(harness.waha.requests.map((r) => r.path)).toEqual(['/api/startTyping'])
+    expect(harness.waha.requests[0]?.headers['x-guard-mailbox-message-id']).toBeUndefined()
   })
 })

@@ -362,7 +362,9 @@ export class Guard {
       this.metrics.inc('presence_suppressed_total', { session })
       return Response.json({ guard: true, suppressed: true, reason: 'presence.owner=guard' })
     }
-    return this.upstream.pass(req, raw)
+    const headers = stripGuardHeaders(req.headers)
+    headers.delete('x-guard-mailbox-message-id')
+    return this.upstream.pass(new Request(req.url, { method: req.method, headers }), raw)
   }
 
   private async handleWebhook(req: Request): Promise<Response> {

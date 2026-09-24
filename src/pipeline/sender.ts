@@ -286,16 +286,18 @@ export class Sender {
     if (plan.steps.length === 0) return
 
     metrics.observe('typing_plan_ms', plan.totalMs, { session: job.session })
+    const presenceHeaders = new Headers(job.headers)
+    presenceHeaders.delete('x-guard-mailbox-message-id')
     try {
       for (const step of plan.steps) {
         const path = step.kind === 'composing' ? '/api/startTyping' : '/api/stopTyping'
-        await upstream.postJson(path, { session: job.session, chatId: job.chatId }, job.headers)
+        await upstream.postJson(path, { session: job.session, chatId: job.chatId }, presenceHeaders)
         await clock.sleep(step.durationMs, job.signal)
       }
       await upstream.postJson(
         '/api/stopTyping',
         { session: job.session, chatId: job.chatId },
-        job.headers,
+        presenceHeaders,
       )
     } catch (error) {
       // A missing typing indicator is cosmetic; failing the send over it is not. But say so.
