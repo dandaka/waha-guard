@@ -185,6 +185,12 @@ Two modes, because it changes your app's contract:
 Policy refusals fail **closed** (`403`/`429`). Infrastructure failures fail **loud**: if WAHA
 is unreachable you get a `502`, never a silent drop and never an unguarded pass-through.
 
+When one mailbox message is delivered through several WAHA requests (for example text plus a
+contact card), pass the same `x-guard-mailbox-message-id` header on every part. The guard
+counts those parts as one message for the per-contact handshake limit and as one re-engagement
+of that contact. The header is kept with queued sends and removed before forwarding to WAHA.
+Requests without the header each count separately.
+
 ### Forcing one send past a limit
 
 Sometimes a budget is wrong about one specific message, and the person who knows that is a
