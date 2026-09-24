@@ -112,6 +112,16 @@ The relationship gates. These are the ones that matter.
 | `requireHumanTouch` | `true` | `false` | **judgement.** Refuse to send to any contact the guard has never seen a human message — either an inbound message, or an outbound one the guard did not send. |
 | `maxNewStrangersPerDay` | 5 | 20 | **guess** |
 | `handshakeMaxMessages` | 1 | 2 | **judgement.** How many messages **per day** may go to someone who has never replied. One is the honest number. |
+| `dormantAfterDays` | 7 | 7 | **starting value, 2026-09-24.** Inbound silence that makes a previously engaged contact dormant. |
+| `maxReengagementsPerDay` | 5 | 5 | **starting value, 2026-09-24.** Distinct dormant contacts re-contacted per session per calendar day. |
+
+The 2026-09-20/21 qualification wave re-contacted workers who had been silent for months;
+`pedro` was banned. An old reply cannot make a worker indefinitely safe to message. A
+contact with a last inbound at least `dormantAfterDays` ago spends one re-engagement slot
+on the first send today. A second unanswered message today is refused by `handshake`.
+The cap returns `403 guard.reengagement_budget`, so excess messages cannot trickle out
+on following days. A recent inbound restores ordinary reply handling. Groups are exempt
+when `groups.mode: exempt`; the budget and status counters are per session.
 
 `requireHumanTouch` is the single most useful control here and the one most likely to be
 turned off for the wrong reason. It encodes the pattern that actually works: a human makes

@@ -621,6 +621,29 @@ export class Store {
     return row.n
   }
 
+  /** Distinct contacts sent to after their last inbound had gone stale at send time.
+   * Reading the inbound history rather than today's contact row keeps a spent slot spent
+   * even if the recipient answers later. Failed sends are removed from `sends` and do not count.
+   */
+  countDormantContactsMessagedSince(
+    session: string,
+    since: number,
+    dormantMs: number,
+    excludeGroups = true,
+  ): number {
+    const row = this.db
+      .query(`
+      SELECT COUNT(DISTINCT s.chat_id) AS n FROM sends s
+      WHERE s.session = ? AND s.sent_at >= ?
+        ${excludeGroups ? Store.notAGroup('s.chat_id') : ''}
+        AND (SELECT MAX(i.at) FROM inbound i
+             WHERE i.session = s.session AND i.chat_id = s.chat_id AND i.at <= s.sent_at)
+            <= s.sent_at - ?
+    `)
+      .get(session, since, dormantMs) as { n: number }
+    return row.n
+  }
+
   lastSendAt(session: string): number | null {
     const row = this.db
       .query('SELECT MAX(sent_at) AS t FROM sends WHERE session = ?')

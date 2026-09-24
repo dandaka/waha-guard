@@ -11,6 +11,7 @@ import { QueueWorker } from './queue/worker.ts'
 import { Store } from './state/store.ts'
 import { type Clock, systemClock } from './util/clock.ts'
 import type { Rng } from './util/random.ts'
+import { DAY, startOfZonedDay } from './util/time.ts'
 import { chatIdFromSendBody, sessionFromSendBody, textFromSendBody } from './waha/message.ts'
 import { SessionMonitor } from './waha/session-health.ts'
 import { Downstream } from './webhook/downstream.ts'
@@ -444,6 +445,22 @@ export class Guard {
               warmupMaxNewContactsPerDay: step?.maxNewContactsPerDay ?? null,
               warmupMaxPerDay: step?.maxPerDay ?? null,
               warmupFromDay: step?.fromDay ?? null,
+            },
+            reengagement: {
+              spentToday: this.store.countDormantContactsMessagedSince(
+                s.session,
+                startOfZonedDay(now, policy.quietHours.timezone),
+                policy.contacts.dormantAfterDays * DAY,
+                policy.groups.mode === 'exempt',
+              ),
+              maxReengagementsPerDay: policy.contacts.maxReengagementsPerDay,
+              dormantAfterDays: policy.contacts.dormantAfterDays,
+              dormantContactsMessagedLast7Days: this.store.countDormantContactsMessagedSince(
+                s.session,
+                now - 7 * DAY,
+                policy.contacts.dormantAfterDays * DAY,
+                policy.groups.mode === 'exempt',
+              ),
             },
             inFlight: this.sender.queueDepth(s.session),
             queued: this.store.queuedDepth(s.session),

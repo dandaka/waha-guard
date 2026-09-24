@@ -199,7 +199,7 @@ curl -X POST localhost:3010/api/sendText \
   -d '{"session":"default","chatId":"351900000000@c.us","text":"..."}'
 ```
 
-What it may override: `handshake_exhausted`, `reply_ratio`, `new_contact_budget`,
+What it may override: `handshake_exhausted`, `reengagement_budget`, `reply_ratio`, `new_contact_budget`,
 `warmup_budget`, `warmup_new_contacts`, `rate_minute` / `_hour` / `_day`. These are numbers we
 guessed and wrote down.
 
@@ -243,6 +243,7 @@ so a client can branch on the reason without parsing prose.
 | `guard.opted_out` | 403 | Recipient asked to stop. Terminal until cleared. |
 | `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
 | `guard.handshake_exhausted` | 403 | Today's unanswered-message limit for this contact is spent. Resets at midnight. |
+| `guard.reengagement_budget` | 403 | This session's daily budget for re-contacting dormant people is spent. Nothing is queued. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
 | `guard.force_not_queueable` | 400 | `x-guard-force` sent to a `queue`-mode session. |
 | `guard.group_blocked` | 403 | Policy refuses group sends from this session. |
