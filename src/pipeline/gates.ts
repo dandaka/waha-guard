@@ -41,6 +41,8 @@ export interface SendContext {
    * never persisted — see `forceable` below and README "Forcing one send past a limit".
    */
   force: boolean
+  /** Mailbox row shared by all text, media and contact-card parts. */
+  mailboxMessageId?: string | null
 }
 
 export interface GateInputs {
@@ -233,6 +235,41 @@ function humanTouch(inputs: GateInputs): GateResult {
   }
 }
 
+function isDormant(inputs: GateInputs): boolean {
+  const { contact, ctx, policy } = inputs
+  const lastTouch = Math.max(contact.last_in_at ?? 0, contact.human_touch_at ?? 0)
+  return (
+    !groupExempt(inputs) &&
+    lastTouch > 0 &&
+    lastTouch <= ctx.now - policy.contacts.dormantAfterDays * DAY
+  )
+}
+
+function reengagementBudget(inputs: GateInputs): GateResult {
+  if (!isDormant(inputs)) return allow
+  const { policy, store, ctx } = inputs
+  const since = startOfZonedDay(ctx.now, policy.quietHours.timezone)
+  // A contact consumes only their first slot today. The handshake gate controls repeats.
+  if (store.countSendsToContactSince(ctx.session, ctx.chatId, since) > 0) return allow
+  const limit = policy.contacts.maxReengagementsPerDay
+  if (!Number.isFinite(limit)) return allow
+  const spent = store.countDormantContactsMessagedSince(
+    ctx.session,
+    since,
+    policy.contacts.dormantAfterDays * DAY,
+    policy.groups.mode === 'exempt',
+  )
+  if (spent < limit) return allow
+  return {
+    kind: 'deny',
+    status: 403,
+    code: 'guard.reengagement_budget',
+    reason:
+      `contacts.maxReengagementsPerDay of ${limit}/day is spent for ${ctx.session}; ` +
+      `dormant contacts are not queued for a later day`,
+  }
+}
+
 /**
  * How many unanswered messages may go to one contact — **per day**, not ever.
  *
@@ -260,7 +297,19 @@ function humanTouch(inputs: GateInputs): GateResult {
 function handshake(inputs: GateInputs): GateResult {
   const { policy, store, contact, ctx } = inputs
   if (groupExempt(inputs)) return allow
-  if (contact.in_count > 0) return allow
+  const dormant = isDormant(inputs)
+  if (contact.in_count > 0 && !dormant) return allow
+  // A mailbox message may be sent as text plus several WAHA media requests.
+  if (
+    ctx.mailboxMessageId &&
+    store.hasMailboxMessageSend(
+      ctx.session,
+      ctx.chatId,
+      ctx.mailboxMessageId,
+      startOfZonedDay(ctx.now, policy.quietHours.timezone),
+    )
+  )
+    return allow
   const timezone = policy.quietHours.timezone
   const sentToday = store.countSendsToContactSince(
     ctx.session,
@@ -274,7 +323,7 @@ function handshake(inputs: GateInputs): GateResult {
     status: 403,
     code: 'guard.handshake_exhausted',
     reason:
-      `${sentToday} message(s) sent today with no reply; limit is ` +
+      `${sentToday} message(s) sent today ${dormant ? 'without a recent reply' : 'with no reply'}; limit is ` +
       `${policy.contacts.handshakeMaxMessages} per day (${contact.out_count} sent in total). ` +
       `Resets at ${resets} — ${timezone} midnight.`,
   }
@@ -482,6 +531,7 @@ const GATES: Gate[] = [
   { run: optOut, forceable: false },
   { run: humanTouch, forceable: false },
   { run: handshake, forceable: true },
+  { run: reengagementBudget, forceable: true },
   { run: replyRatio, forceable: true },
   { run: timelock, forceable: false },
   { run: quietHours, forceable: false },

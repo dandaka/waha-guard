@@ -91,6 +91,10 @@ export interface ContactPolicy {
   maxNewStrangersPerDay: number
   /** Messages allowed to a contact that has never replied. */
   handshakeMaxMessages: number
+  /** Inbound silence after which a previously engaged contact needs re-engagement. */
+  dormantAfterDays: number
+  /** Distinct dormant contacts first messaged per calendar day, per session. */
+  maxReengagementsPerDay: number
 }
 
 export interface GroupPolicy {
@@ -287,6 +291,8 @@ const conservative: SessionPolicy = {
     requireHumanTouch: true,
     maxNewStrangersPerDay: 5,
     handshakeMaxMessages: 1,
+    dormantAfterDays: 7,
+    maxReengagementsPerDay: 5,
   },
   groups: { mode: 'exempt' },
   replyRatio: {
@@ -359,6 +365,8 @@ balanced.contacts = {
   requireHumanTouch: false,
   maxNewStrangersPerDay: 20,
   handshakeMaxMessages: 2,
+  dormantAfterDays: 7,
+  maxReengagementsPerDay: 5,
 }
 balanced.replyRatio.maxOutPerIn = 6
 
@@ -382,6 +390,8 @@ off.contacts = {
   requireHumanTouch: false,
   maxNewStrangersPerDay: Number.POSITIVE_INFINITY,
   handshakeMaxMessages: Number.POSITIVE_INFINITY,
+  dormantAfterDays: 7,
+  maxReengagementsPerDay: Number.POSITIVE_INFINITY,
 }
 off.replyRatio.enabled = false
 off.optOut.enabled = false

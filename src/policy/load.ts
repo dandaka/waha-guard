@@ -66,6 +66,10 @@ function validate(p: Policy): void {
     }
     if (s.rates.minSpacingMs < 0) problems.push(`${scope}.rates.minSpacingMs must be >= 0`)
     if (s.rates.jitterStddevMs < 0) problems.push(`${scope}.rates.jitterStddevMs must be >= 0`)
+    if (!Number.isFinite(s.contacts.dormantAfterDays) || s.contacts.dormantAfterDays <= 0)
+      problems.push(`${scope}.contacts.dormantAfterDays must be a positive number`)
+    if (s.contacts.maxReengagementsPerDay < 0)
+      problems.push(`${scope}.contacts.maxReengagementsPerDay must be >= 0`)
     if (s.backpressure.maxWaitMs <= 0) problems.push(`${scope}.backpressure.maxWaitMs must be > 0`)
     if (s.typing.enabled) {
       if (s.typing.wpmMin <= 0) problems.push(`${scope}.typing.wpmMin must be > 0`)

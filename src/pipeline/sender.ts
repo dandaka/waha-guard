@@ -108,14 +108,25 @@ export class Sender {
     // Reserve the slot before forwarding. It consumes the window budget even if the
     // response is slow, and it is the marker that lets webhook observation tell our own
     // echo apart from a message typed on the phone when the echo beats the response back.
-    const sendId = store.recordGuardOutbound(job.session, job.chatId, job.route, null, clock.now())
+    const sendId = store.recordGuardOutbound(
+      job.session,
+      job.chatId,
+      job.route,
+      null,
+      clock.now(),
+      job.headers.get('x-guard-mailbox-message-id'),
+    )
 
     let response: Response
     try {
       response = await this.deps.upstream.pass(
         new Request(`http://upstream${job.path}`, {
           method: job.method,
-          headers: job.headers,
+          headers: (() => {
+            const headers = new Headers(job.headers)
+            headers.delete('x-guard-mailbox-message-id')
+            return headers
+          })(),
         }),
         job.body,
       )
@@ -177,6 +188,7 @@ export class Sender {
           now,
           jitterMs,
           force: job.force === true,
+          mailboxMessageId: job.headers.get('x-guard-mailbox-message-id'),
         },
       })
 
@@ -274,16 +286,18 @@ export class Sender {
     if (plan.steps.length === 0) return
 
     metrics.observe('typing_plan_ms', plan.totalMs, { session: job.session })
+    const presenceHeaders = new Headers(job.headers)
+    presenceHeaders.delete('x-guard-mailbox-message-id')
     try {
       for (const step of plan.steps) {
         const path = step.kind === 'composing' ? '/api/startTyping' : '/api/stopTyping'
-        await upstream.postJson(path, { session: job.session, chatId: job.chatId }, job.headers)
+        await upstream.postJson(path, { session: job.session, chatId: job.chatId }, presenceHeaders)
         await clock.sleep(step.durationMs, job.signal)
       }
       await upstream.postJson(
         '/api/stopTyping',
         { session: job.session, chatId: job.chatId },
-        job.headers,
+        presenceHeaders,
       )
     } catch (error) {
       // A missing typing indicator is cosmetic; failing the send over it is not. But say so.

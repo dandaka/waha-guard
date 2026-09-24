@@ -185,6 +185,12 @@ Two modes, because it changes your app's contract:
 Policy refusals fail **closed** (`403`/`429`). Infrastructure failures fail **loud**: if WAHA
 is unreachable you get a `502`, never a silent drop and never an unguarded pass-through.
 
+When one mailbox message is delivered through several WAHA requests (for example text plus a
+contact card), pass the same `x-guard-mailbox-message-id` header on every part. The guard
+counts those parts as one message for the per-contact handshake limit and as one re-engagement
+of that contact. The header is kept with queued sends and removed before forwarding to WAHA.
+Requests without the header each count separately.
+
 ### Forcing one send past a limit
 
 Sometimes a budget is wrong about one specific message, and the person who knows that is a
@@ -199,7 +205,7 @@ curl -X POST localhost:3010/api/sendText \
   -d '{"session":"default","chatId":"351900000000@c.us","text":"..."}'
 ```
 
-What it may override: `handshake_exhausted`, `reply_ratio`, `new_contact_budget`,
+What it may override: `handshake_exhausted`, `reengagement_budget`, `reply_ratio`, `new_contact_budget`,
 `warmup_budget`, `warmup_new_contacts`, `rate_minute` / `_hour` / `_day`. These are numbers we
 guessed and wrote down.
 
@@ -243,6 +249,7 @@ so a client can branch on the reason without parsing prose.
 | `guard.opted_out` | 403 | Recipient asked to stop. Terminal until cleared. |
 | `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
 | `guard.handshake_exhausted` | 403 | Today's unanswered-message limit for this contact is spent. Resets at midnight. |
+| `guard.reengagement_budget` | 403 | This session's daily budget for re-contacting dormant people is spent. Nothing is queued. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
 | `guard.force_not_queueable` | 400 | `x-guard-force` sent to a `queue`-mode session. |
 | `guard.group_blocked` | 403 | Policy refuses group sends from this session. |
