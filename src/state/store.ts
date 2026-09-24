@@ -161,6 +161,9 @@ const MIGRATIONS: string[] = [
   // Why a stop happened and when it started, so a flap can be told from an outage.
   `ALTER TABLE session_state ADD COLUMN stopped_status TEXT;
    ALTER TABLE session_state ADD COLUMN stopped_since INTEGER;`,
+  // The dormant budget asks for the last inbound before each send. The existing
+  // session/time index cannot seek one contact within a busy session.
+  `CREATE INDEX inbound_contact_time ON inbound (session, chat_id, at);`,
 ]
 
 const STATE_RANK: Record<ContactState, number> = {
