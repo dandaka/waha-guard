@@ -244,6 +244,10 @@ export class Guard {
     }
 
     const { force, forceReason } = parseForce(req.headers)
+    const quiet = parseQuietOverride(req.headers)
+    if (quiet.error) {
+      return this.guardError(400, 'guard.quiet_override_reason_required', quiet.error)
+    }
     const text = textFromSendBody(body, match.textField ?? null)
     const job = {
       session,
@@ -260,6 +264,8 @@ export class Guard {
       signal: req.signal,
       force,
       forceReason,
+      quietOverride: quiet.quietOverride,
+      quietOverrideReason: quiet.quietOverrideReason,
     }
 
     if (policy.backpressure.mode === 'queue') {
@@ -273,6 +279,15 @@ export class Guard {
           'x-guard-force is only honoured when backpressure.mode is `block`: a forced send ' +
             'must succeed or fail on this request, never be parked in a queue. Send it ' +
             'without the header, or switch the session to block mode.',
+        )
+      }
+      if (quiet.quietOverride) {
+        // Same reasoning as force: an override that waits in a queue is an override
+        // nobody is watching when it finally fires.
+        return this.guardError(
+          400,
+          'guard.quiet_override_not_queueable',
+          'x-guard-quiet-override is only honoured when backpressure.mode is `block`.',
         )
       }
       return this.enqueue(job)
@@ -702,10 +717,44 @@ function parseForce(headers: Headers): { force: boolean; forceReason: string | n
   return { force: true, forceReason: reason ? reason.slice(0, 200) : null }
 }
 
+const QUIET_OVERRIDE_HEADER = 'x-guard-quiet-override'
+const QUIET_OVERRIDE_REASON_HEADER = 'x-guard-quiet-override-reason'
+
+/**
+ * `x-guard-quiet-override: 1` — send this one message inside quiet hours.
+ *
+ * It skips `guard.quiet_hours` and nothing else; every other gate, force-able or not,
+ * still runs (see `quietOverridable` in gates.ts). Unlike force, a reason is mandatory
+ * here: the header without `x-guard-quiet-override-reason` is refused, not ignored,
+ * because a caller that believes it sent at 06:40 and was silently held to 08:00 has
+ * learned the wrong thing. Who may set it is the caller's rule, not the guard's — the
+ * mailbox allows it from an interactive session and never from automation.
+ */
+function parseQuietOverride(headers: Headers): {
+  quietOverride: boolean
+  quietOverrideReason: string | null
+  error?: string
+} {
+  const raw = headers.get(QUIET_OVERRIDE_HEADER)?.trim().toLowerCase()
+  const on = raw === '1' || raw === 'true' || raw === 'yes'
+  if (!on) return { quietOverride: false, quietOverrideReason: null }
+  const reason = headers.get(QUIET_OVERRIDE_REASON_HEADER)?.trim()
+  if (!reason) {
+    return {
+      quietOverride: false,
+      quietOverrideReason: null,
+      error: `${QUIET_OVERRIDE_HEADER} needs ${QUIET_OVERRIDE_REASON_HEADER}`,
+    }
+  }
+  return { quietOverride: true, quietOverrideReason: reason.slice(0, 200) }
+}
+
 function stripGuardHeaders(headers: Headers): Headers {
   const copy = new Headers(headers)
   copy.delete(FORCE_HEADER)
   copy.delete(FORCE_REASON_HEADER)
+  copy.delete(QUIET_OVERRIDE_HEADER)
+  copy.delete(QUIET_OVERRIDE_REASON_HEADER)
   return copy
 }
 

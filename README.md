@@ -218,7 +218,7 @@ What it may **never** override, and why:
 | `no_human_touch` | The relationship control. Skipping it turns force into a cold-outreach switch. |
 | `group_blocked` | A policy statement that this session does not post to groups, not a budget that ran out. |
 | `degraded` | WhatsApp itself is rate-limiting you. The one gate whose input is the platform's opinion. |
-| `quiet_hours` · `quiet_day` | A 03:00 message is not worth forcing, and the send goes at 08:00 by itself. |
+| `quiet_hours` · `quiet_day` | A 03:00 message is not worth forcing, and the send goes at 08:00 by itself. `quiet_hours` has its own narrower override, below. |
 | `spacing` | Seconds, not a day, and it resolves itself inside `maxWaitMs`. Nothing to gain. |
 
 The design constraints are as deliberate as the allowlist:
@@ -239,6 +239,36 @@ The design constraints are as deliberate as the allowlist:
 
 Both headers are stripped before the request reaches WAHA.
 
+### Sending one message inside quiet hours
+
+Some messages are only worth anything inside the quiet window: a 06:40 "are you on your way?"
+before a 07:20 pickup is useless at 08:00. `x-guard-quiet-override: 1` skips
+`guard.quiet_hours` for that one request, and nothing else:
+
+```bash
+curl -X POST localhost:3010/api/sendText \
+  -H 'x-api-key: ...' \
+  -H 'x-guard-quiet-override: 1' \
+  -H 'x-guard-quiet-override-reason: start-day check, pickup 07:20' \
+  -d '{"session":"default","chatId":"351900000000@c.us","text":"..."}'
+```
+
+- **Only quiet hours.** Opt-out, a stopped session, human touch, the handshake cap, every
+  budget, `degraded`, `spacing` and a configured `quiet_day` all still apply. It is not force
+  and does not imply it; a caller that needs both sends both headers.
+- **A reason is mandatory.** The header without `x-guard-quiet-override-reason` is refused
+  with `guard.quiet_override_reason_required` rather than silently held to 08:00.
+- **No queue.** On a `queue`-mode session it is refused with
+  `guard.quiet_override_not_queueable`, for the same reason as force.
+- **Loud.** Every request logs `quiet override requested`; a send it actually carried past
+  the window logs `sent inside quiet hours` with the chat and reason, and counts in
+  `gate_quiet_overridden_total`. The `sent` line carries `quietOverride: true`.
+- **Who may send it is the caller's decision.** The guard cannot tell a person from a loop.
+  The calling system is expected to allow it only from an interactive, human-directed
+  session.
+
+Both headers are stripped before the request reaches WAHA.
+
 ### Reason codes
 
 Every guard-generated response carries `X-Guard-Reason` and a JSON body with the same code,
@@ -252,6 +282,8 @@ so a client can branch on the reason without parsing prose.
 | `guard.reengagement_budget` | 403 | This session's daily budget for re-contacting dormant people is spent. Nothing is queued. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
 | `guard.force_not_queueable` | 400 | `x-guard-force` sent to a `queue`-mode session. |
+| `guard.quiet_override_reason_required` | 400 | `x-guard-quiet-override` without `x-guard-quiet-override-reason`. |
+| `guard.quiet_override_not_queueable` | 400 | `x-guard-quiet-override` sent to a `queue`-mode session. |
 | `guard.group_blocked` | 403 | Policy refuses group sends from this session. |
 | `guard.unidentified_recipient` | 400 | No `chatId` in the request, so contact policy is blind. |
 | `guard.reply_ratio` | 429 | Sending far more than is coming back. |

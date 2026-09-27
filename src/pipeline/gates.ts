@@ -41,6 +41,14 @@ export interface SendContext {
    * never persisted — see `forceable` below and README "Forcing one send past a limit".
    */
   force: boolean
+  /**
+   * `x-guard-quiet-override` — a human-authorised send inside quiet hours, for this one
+   * request. Skips `guard.quiet_hours` and nothing else: not `quiet_day`, not a budget, not
+   * consent. Separate from `force` because the two answer different questions — force is
+   * "our budget guessed wrong about this message", this is "this message is only worth
+   * anything at 06:40". See `quietOverridable` below.
+   */
+  quietOverride?: boolean
   /** Mailbox row shared by all text, media and contact-card parts. */
   mailboxMessageId?: string | null
 }
@@ -519,6 +527,16 @@ interface Gate {
    *    anti-ban behaviour there is; there is nothing to gain by skipping it.
    */
   forceable: boolean
+  /**
+   * May `x-guard-quiet-override` skip this gate? Only `quietHours` says yes, and even
+   * there only for `guard.quiet_hours` — a configured quiet *day* is a statement about the
+   * whole day, not a window a start-day check happens to fall into.
+   *
+   * Quiet hours protect the recipient's night from chat. A pickup at 07:20 makes a 06:40
+   * "are you on your way?" the one message the recipient wants at that hour, and the
+   * self-resolving argument above fails for it: at 08:00 the message is worthless.
+   */
+  quietOverridable?: boolean
 }
 
 /**
@@ -534,7 +552,7 @@ const GATES: Gate[] = [
   { run: reengagementBudget, forceable: true },
   { run: replyRatio, forceable: true },
   { run: timelock, forceable: false },
-  { run: quietHours, forceable: false },
+  { run: quietHours, forceable: false, quietOverridable: true },
   { run: strangerCap, forceable: true },
   { run: warmupNewContacts, forceable: true },
   { run: warmupBudget, forceable: true },
@@ -551,20 +569,32 @@ export interface GateEvaluation {
    * is a hole in the only audit trail we have for sends that bypass the mailbox.
    */
   forced: string[]
+  /** True when `ctx.quietOverride` actually got this send past `guard.quiet_hours`. */
+  quietOverridden: boolean
 }
 
 export function evaluate(inputs: GateInputs): GateEvaluation {
   let latest: GateResult | null = null
   const forced: string[] = []
+  let quietOverridden = false
   for (const gate of GATES) {
     const result = gate.run(inputs)
+    if (
+      inputs.ctx.quietOverride &&
+      gate.quietOverridable &&
+      result.kind !== 'allow' &&
+      result.code === 'guard.quiet_hours'
+    ) {
+      quietOverridden = true
+      continue
+    }
     if (inputs.ctx.force && gate.forceable) {
       // Run it anyway and report only the gates that would have said no, so the audit line
       // names the limit that was actually overridden rather than every gate force may touch.
       if (result.kind !== 'allow') forced.push(result.code)
       continue
     }
-    if (result.kind === 'deny') return { result, forced }
+    if (result.kind === 'deny') return { result, forced, quietOverridden }
     if (
       result.kind === 'wait' &&
       (latest === null || result.until > (latest as { until: number }).until)
@@ -572,5 +602,5 @@ export function evaluate(inputs: GateInputs): GateEvaluation {
       latest = result
     }
   }
-  return { result: latest ?? allow, forced }
+  return { result: latest ?? allow, forced, quietOverridden }
 }
