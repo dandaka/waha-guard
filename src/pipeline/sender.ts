@@ -31,6 +31,12 @@ export interface SendJob {
   force?: boolean
   /** Free text from `x-guard-force-reason`, carried into the audit line. */
   forceReason?: string | null
+  /**
+   * `x-guard-quiet-override`: skip `guard.quiet_hours` for this one send, nothing else.
+   * The guard refuses the header without a reason, so a set flag always carries one.
+   */
+  quietOverride?: boolean
+  quietOverrideReason?: string | null
 }
 
 export type SendResult =
@@ -98,6 +104,15 @@ export class Sender {
       })
     }
 
+    if (job.quietOverride) {
+      log.warn('quiet override requested', {
+        session: job.session,
+        chatId: job.chatId,
+        route: job.route,
+        quietOverrideReason: job.quietOverrideReason ?? null,
+      })
+    }
+
     const gateOutcome = await this.awaitGates(job, policy, deadline, jitterMs)
     if (gateOutcome.status !== 'ok') return gateOutcome.result
 
@@ -157,6 +172,7 @@ export class Sender {
       route: job.route,
       msgId,
       forced: job.force === true,
+      quietOverride: job.quietOverride === true,
     })
     return { status: 'sent', response: replayed, msgId }
   }
@@ -171,11 +187,12 @@ export class Sender {
     const { store, clock, metrics, log } = this.deps
     // The gates are re-run every round; an override must be reported once, not once per loop.
     const announced = new Set<string>()
+    let quietAnnounced = false
     for (let round = 0; round < MAX_GATE_ROUNDS; round++) {
       const now = clock.now()
       const contact = store.ensureContact(job.session, job.chatId, now)
       const session = store.ensureSession(job.session, now)
-      const { result, forced } = evaluate({
+      const { result, forced, quietOverridden } = evaluate({
         policy,
         store,
         contact,
@@ -188,6 +205,7 @@ export class Sender {
           now,
           jitterMs,
           force: job.force === true,
+          quietOverride: job.quietOverride === true,
           mailboxMessageId: job.headers.get('x-guard-mailbox-message-id'),
         },
       })
@@ -202,6 +220,18 @@ export class Sender {
           route: job.route,
           code,
           forceReason: job.forceReason ?? null,
+        })
+      }
+
+      if (quietOverridden && !quietAnnounced) {
+        quietAnnounced = true
+        metrics.inc('gate_quiet_overridden_total', { session: job.session })
+        log.warn('sent inside quiet hours', {
+          session: job.session,
+          chatId: job.chatId,
+          route: job.route,
+          code: 'guard.quiet_hours',
+          quietOverrideReason: job.quietOverrideReason ?? null,
         })
       }
 
