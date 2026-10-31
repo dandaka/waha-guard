@@ -226,6 +226,25 @@ export interface RoutePolicy {
   waived: string[]
 }
 
+/**
+ * Number lookups (`checkNumberStatus`, `contacts/check-exists`). Every one that reaches WAHA
+ * is a contact query on WhatsApp's servers, so the guard answers repeats from its own record
+ * and caps how many reach WhatsApp. Windows are sliding, counted from the `lookups` table.
+ */
+export interface LookupPolicy {
+  enabled: boolean
+  /** How long "this number is on WhatsApp" is answered from the guard's record. */
+  positiveTtlMs: number
+  /** How long "not on WhatsApp" is. Shorter: a number can join WhatsApp. */
+  negativeTtlMs: number
+  /** Upstream lookups of one number per rolling hour. Beyond it, the last answer or a 429. */
+  maxPerNumberPerHour: number
+  /** Upstream lookups per session per rolling hour. */
+  maxPerHour: number
+  /** Upstream lookups per session per rolling 24 hours. */
+  maxPerDay: number
+}
+
 export interface SessionPolicy {
   mode: EnforcementMode
   presence: PresenceOwner
@@ -242,6 +261,7 @@ export interface SessionPolicy {
   ack: AckPolicy
   sessionHealth: SessionHealthPolicy
   routes: RoutePolicy
+  lookups: LookupPolicy
 }
 
 export interface Policy extends SessionPolicy {
@@ -344,6 +364,14 @@ const conservative: SessionPolicy = {
     autoRestart: { enabled: true, afterMs: 60_000, cooldownMs: 300_000 },
   },
   routes: { unknownSends: 'block', waived: [] },
+  lookups: {
+    enabled: true,
+    positiveTtlMs: 24 * 60 * 60 * 1000,
+    negativeTtlMs: 60 * 60 * 1000,
+    maxPerNumberPerHour: 2,
+    maxPerHour: 60,
+    maxPerDay: 300,
+  },
 }
 
 const balanced: SessionPolicy = structuredClone(conservative)
@@ -369,6 +397,7 @@ balanced.contacts = {
   maxReengagementsPerDay: 5,
 }
 balanced.replyRatio.maxOutPerIn = 6
+balanced.lookups = { ...balanced.lookups, maxPerHour: 120, maxPerDay: 600 }
 
 /**
  * `off` is a pure pass-through with state still recorded. It exists so a user can adopt
@@ -395,6 +424,7 @@ off.contacts = {
 }
 off.replyRatio.enabled = false
 off.optOut.enabled = false
+off.lookups.enabled = false
 off.typing.enabled = false
 off.timelock.enabled = false
 off.ack.enabled = false

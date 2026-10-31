@@ -166,7 +166,34 @@ const MIGRATIONS: string[] = [
   `CREATE INDEX inbound_contact_time ON inbound (session, chat_id, at);`,
   `ALTER TABLE sends ADD COLUMN mailbox_message_id TEXT;
    CREATE INDEX sends_mailbox_message ON sends (session, chat_id, mailbox_message_id);`,
+  // Number lookups: the last answer per number, and one row per lookup that reached WAHA.
+  `CREATE TABLE number_checks (
+     session        TEXT NOT NULL,
+     phone          TEXT NOT NULL,
+     number_exists  INTEGER NOT NULL,
+     checked_at     INTEGER NOT NULL,
+     body           TEXT NOT NULL,
+     PRIMARY KEY (session, phone)
+   );
+   CREATE TABLE lookups (
+     session  TEXT NOT NULL,
+     phone    TEXT NOT NULL,
+     at       INTEGER NOT NULL
+   );
+   CREATE INDEX lookups_session_time ON lookups (session, at);
+   CREATE INDEX lookups_number_time ON lookups (session, phone, at);`,
 ]
+
+export interface NumberCheckRow {
+  session: string
+  phone: string
+  number_exists: number
+  checked_at: number
+  body: string
+}
+
+/** Lookups older than this are no use to any window and are deleted. */
+const LOOKUP_RETENTION_MS = 2 * 24 * 60 * 60 * 1000
 
 const STATE_RANK: Record<ContactState, number> = {
   stranger: 0,
@@ -213,6 +240,57 @@ export class Store {
 
   close(): void {
     this.db.close()
+  }
+
+  // ---- number lookups ----------------------------------------------------
+
+  getNumberCheck(session: string, phone: string): NumberCheckRow | null {
+    return this.db
+      .query('SELECT * FROM number_checks WHERE session = ? AND phone = ?')
+      .get(session, phone) as NumberCheckRow | null
+  }
+
+  putNumberCheck(session: string, phone: string, exists: boolean, at: number, body: string): void {
+    this.db
+      .query(
+        `INSERT INTO number_checks (session, phone, number_exists, checked_at, body)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (session, phone) DO UPDATE SET
+           number_exists = excluded.number_exists,
+           checked_at = excluded.checked_at,
+           body = excluded.body`,
+      )
+      .run(session, phone, exists ? 1 : 0, at, body)
+  }
+
+  /** One lookup that reached WAHA. */
+  recordLookup(session: string, phone: string, at: number): void {
+    this.db
+      .query('INSERT INTO lookups (session, phone, at) VALUES (?, ?, ?)')
+      .run(session, phone, at)
+    this.db.query('DELETE FROM lookups WHERE at < ?').run(at - LOOKUP_RETENTION_MS)
+  }
+
+  /** Lookups since `since` for a session, or one number in it, and the oldest of them. */
+  lookupWindow(
+    session: string,
+    since: number,
+    phone?: string,
+  ): { count: number; oldest: number | null } {
+    const row = (
+      phone === undefined
+        ? this.db
+            .query(
+              'SELECT COUNT(*) AS n, MIN(at) AS oldest FROM lookups WHERE session = ? AND at > ?',
+            )
+            .get(session, since)
+        : this.db
+            .query(
+              'SELECT COUNT(*) AS n, MIN(at) AS oldest FROM lookups WHERE session = ? AND phone = ? AND at > ?',
+            )
+            .get(session, phone, since)
+    ) as { n: number; oldest: number | null }
+    return { count: row.n, oldest: row.oldest }
   }
 
   // ---- identity -----------------------------------------------------------

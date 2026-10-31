@@ -4,14 +4,14 @@ import { Metrics } from './observability/metrics.ts'
 import { countsNewStrangers, warmupStep } from './pipeline/gates.ts'
 import { Sender } from './pipeline/sender.ts'
 import { forSession } from './policy/load.ts'
-import type { Policy } from './policy/schema.ts'
+import type { Policy, SessionPolicy } from './policy/schema.ts'
 import { classifyPath, isUnknownSend, KNOWN_SEND_ROUTES } from './proxy/routes.ts'
 import { Upstream, UpstreamError } from './proxy/upstream.ts'
 import { QueueWorker } from './queue/worker.ts'
 import { Store } from './state/store.ts'
 import { type Clock, systemClock } from './util/clock.ts'
 import type { Rng } from './util/random.ts'
-import { DAY, startOfZonedDay } from './util/time.ts'
+import { DAY, HOUR, startOfZonedDay } from './util/time.ts'
 import { chatIdFromSendBody, sessionFromSendBody, textFromSendBody } from './waha/message.ts'
 import { SessionMonitor } from './waha/session-health.ts'
 import { Downstream } from './webhook/downstream.ts'
@@ -165,6 +165,7 @@ export class Guard {
 
       if (match.kind === 'send') return await this.handleSend(req, url, match)
       if (match.kind === 'presence') return await this.handlePresence(req, match)
+      if (match.kind === 'lookup') return await this.handleLookup(req, url, match)
       this.metrics.inc('proxy_passthrough_total')
       return await this.upstream.pass(req)
     } catch (error) {
@@ -354,6 +355,115 @@ export class Guard {
   }
 
   /**
+   * "Is this number on WhatsApp?"
+   *
+   * Every lookup that reaches WAHA is a contact query on WhatsApp's servers. Asking about
+   * the same number again and again, or about many numbers, looks like contact scraping,
+   * and on 2026-10-31 a retry loop doing exactly that (about 41,000 lookups in one night
+   * on eight numbers) got a line banned. So:
+   *
+   * 1. A fresh answer on record is returned without asking WhatsApp.
+   * 2. Upstream lookups are capped per number per hour, and per session per hour and day.
+   *    Over a cap, the last answer on record is returned if there is one. Otherwise the
+   *    caller gets a 429 `guard.lookup_budget` with `retryAfterMs`, and asks again later.
+   */
+  private async handleLookup(
+    req: Request,
+    url: URL,
+    match: ReturnType<typeof classifyPath>,
+  ): Promise<Response> {
+    const session = match.sessionFromPath ?? url.searchParams.get('session') ?? 'default'
+    const policy = forSession(this.policy, session)
+    const phone = lookupPhone(url.searchParams.get('phone'))
+    if (!policy.lookups.enabled || !phone) {
+      this.metrics.inc('proxy_passthrough_total')
+      return this.upstream.pass(req)
+    }
+    const limits = policy.lookups
+    const now = this.clock.now()
+
+    const known = this.store.getNumberCheck(session, phone)
+    if (known) {
+      const ttl = known.number_exists ? limits.positiveTtlMs : limits.negativeTtlMs
+      if (now - known.checked_at < ttl) {
+        this.metrics.inc('lookup_total', { session, result: 'cached' })
+        return lookupAnswer(known.body, 'cached')
+      }
+    }
+
+    const over = this.lookupOverBudget(session, phone, limits, now)
+    if (over && policy.mode !== 'observe') {
+      if (known) {
+        this.metrics.inc('lookup_total', { session, result: 'stale' })
+        return lookupAnswer(known.body, 'stale')
+      }
+      this.metrics.inc('lookup_total', { session, result: 'refused' })
+      this.log.warn('number lookup refused', { session, phone, cap: over.cap })
+      return this.guardError(
+        429,
+        'guard.lookup_budget',
+        `number lookups for ${session} are over ${over.cap}; each one is a contact query on ` +
+          'WhatsApp, so the guard is holding them',
+        over.retryAfterMs,
+      )
+    }
+
+    const response = await this.upstream.pass(req)
+    this.store.recordLookup(session, phone, now)
+    this.metrics.inc('lookup_total', { session, result: 'upstream' })
+    if (response.status !== 200) return response
+    const body = await response.text()
+    let exists: unknown
+    try {
+      exists = (JSON.parse(body) as { numberExists?: unknown }).numberExists
+    } catch {
+      exists = undefined
+    }
+    if (typeof exists === 'boolean') this.store.putNumberCheck(session, phone, exists, now, body)
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    })
+  }
+
+  /** The first lookup cap that is full, and when it frees, or null if one more may go. */
+  private lookupOverBudget(
+    session: string,
+    phone: string,
+    limits: SessionPolicy['lookups'],
+    now: number,
+  ): { cap: string; retryAfterMs: number } | null {
+    const caps = [
+      {
+        cap: `${limits.maxPerNumberPerHour} per number per hour`,
+        max: limits.maxPerNumberPerHour,
+        windowMs: HOUR,
+        phone,
+      },
+      {
+        cap: `${limits.maxPerHour} per hour`,
+        max: limits.maxPerHour,
+        windowMs: HOUR,
+        phone: undefined,
+      },
+      {
+        cap: `${limits.maxPerDay} per day`,
+        max: limits.maxPerDay,
+        windowMs: DAY,
+        phone: undefined,
+      },
+    ]
+    for (const c of caps) {
+      const w = this.store.lookupWindow(session, now - c.windowMs, c.phone)
+      if (w.count >= c.max) {
+        return { cap: c.cap, retryAfterMs: Math.max(1_000, (w.oldest ?? now) + c.windowMs - now) }
+      }
+    }
+    return null
+  }
+
+  /**
    * Presence is owned by exactly one side. When the guard owns it, a caller's own typing
    * simulation is swallowed rather than interleaved — two sources of `composing` on one
    * chat is worse than either alone.
@@ -478,6 +588,12 @@ export class Guard {
                 policy.contacts.dormantAfterDays * DAY,
                 policy.groups.mode === 'exempt',
               ),
+            },
+            lookups: {
+              lastHour: this.store.lookupWindow(s.session, now - HOUR).count,
+              lastDay: this.store.lookupWindow(s.session, now - DAY).count,
+              maxPerHour: policy.lookups.maxPerHour,
+              maxPerDay: policy.lookups.maxPerDay,
             },
             inFlight: this.sender.queueDepth(s.session),
             queued: this.store.queuedDepth(s.session),
@@ -768,4 +884,19 @@ function isPerRequestHeader(name: string): boolean {
     lower === 'transfer-encoding' ||
     lower === 'accept-encoding'
   )
+}
+
+/** The digits of a lookup's `phone` parameter (`351912345678`, `+351…`, `351…@c.us`). */
+function lookupPhone(raw: string | null): string | null {
+  if (!raw) return null
+  const digits = raw.split('@')[0]!.replace(/\D/g, '')
+  return digits.length >= 6 ? digits : null
+}
+
+/** An answer from the guard's record, in WAHA's own shape. */
+function lookupAnswer(body: string, source: 'cached' | 'stale'): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'x-guard-lookup': source },
+  })
 }

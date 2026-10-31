@@ -307,3 +307,26 @@ A path that looks like it creates a message but is not in the guard's route tabl
 refused. This is deliberately noisy: a new WAHA release adding a send endpoint should break
 loudly rather than quietly open an unguarded path. Add the exact path to `waived` to pass it
 through, and please open an issue so it can be guarded properly.
+
+## `lookups`
+
+Number lookups are `GET /api/checkNumberStatus` and `GET /api/[{session}/]contacts/check-exists`.
+Each one that reaches WAHA is a contact query on WhatsApp's servers. Asking about the same
+number again and again, or about many numbers, looks like contact scraping. On 2026-10-31 a
+caller's retry loop made about 41,000 lookups in one night on eight numbers, and WhatsApp
+banned the line that morning. Until then lookups passed through unguarded.
+
+| Field | Default (conservative) | Meaning |
+|---|---|---|
+| `enabled` | `true` (`off` preset: `false`) | Guard lookups at all. |
+| `positiveTtlMs` | 24 h | "On WhatsApp" is answered from the guard's record for this long. |
+| `negativeTtlMs` | 1 h | "Not on WhatsApp" is answered from the record for this long. |
+| `maxPerNumberPerHour` | 2 | Upstream lookups of one number per rolling hour. |
+| `maxPerHour` | 60 (balanced: 120) | Upstream lookups per session per rolling hour. |
+| `maxPerDay` | 300 (balanced: 600) | Upstream lookups per session per rolling 24 h. |
+
+How a cap applies: if the guard already has an answer for the number, it returns that answer,
+marked `x-guard-lookup: stale`. Otherwise the caller gets a `429 guard.lookup_budget` with
+`retryAfterMs`. Answers served from the record are marked `x-guard-lookup: cached` and do not
+count against any cap. `/_guard/status` shows `lookups.lastHour` and `lookups.lastDay` per
+session, next to the caps. In `observe` mode, lookups are counted and cached but never refused.
