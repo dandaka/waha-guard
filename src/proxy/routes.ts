@@ -16,6 +16,8 @@ export type RouteKind =
   | 'send'
   /** Presence — passes through unless the guard owns presence for that session. */
   | 'presence'
+  /** "Is this number on WhatsApp?" Cached and budgeted per session; see Guard.handleLookup. */
+  | 'lookup'
   /** Anything else: proxied byte-for-byte. */
   | 'passthrough'
 
@@ -60,6 +62,14 @@ const SCOPED_SEND_SUFFIXES: Record<string, { name: string; textField: 'text' | '
     messages: { name: 'messages', textField: 'text' },
   }
 
+/**
+ * Number lookups. Each one is a contact query on WhatsApp's servers, and asking about many
+ * numbers, or the same number thousands of times, is what WhatsApp bans for. On 2026-10-31
+ * a retry loop made about 41,000 of them in one night on eight numbers, and the line was
+ * banned that morning. They passed through unguarded until then.
+ */
+const LOOKUP_ROUTES = new Set(['checkNumberStatus', 'contacts/check-exists'])
+
 const PRESENCE_ROUTES = new Set(['startTyping', 'stopTyping', 'sendSeen', 'presence'])
 
 /**
@@ -88,6 +98,8 @@ export function classifyPath(
 
   const rest = path.slice('/api/'.length)
 
+  if (method === 'GET' && LOOKUP_ROUTES.has(rest)) return { kind: 'lookup', name: rest }
+
   // Unscoped: /api/sendText, /api/send/buttons/reply
   const unscoped = SEND_ROUTES[rest]
   if (unscoped && bodyMethod) {
@@ -103,6 +115,9 @@ export function classifyPath(
   if (segments.length >= 2) {
     const session = head
     const suffix = segments.slice(1).join('/')
+    if (method === 'GET' && LOOKUP_ROUTES.has(suffix)) {
+      return { kind: 'lookup', name: suffix, sessionFromPath: session }
+    }
     const scoped = SCOPED_SEND_SUFFIXES[suffix]
     if (scoped && bodyMethod) {
       return {

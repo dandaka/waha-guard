@@ -96,6 +96,17 @@ function validate(p: Policy): void {
         prev = step.fromDay
       }
     }
+    if (s.lookups.enabled) {
+      for (const field of [
+        'positiveTtlMs',
+        'negativeTtlMs',
+        'maxPerNumberPerHour',
+        'maxPerHour',
+        'maxPerDay',
+      ] as const) {
+        if (!(s.lookups[field] >= 0)) problems.push(`${scope}.lookups.${field} must be >= 0`)
+      }
+    }
     if (s.presence === 'guard' && !s.typing.enabled) {
       // Not an error: owning presence without a typing plan just means the guard suppresses
       // nothing and sends nothing. Worth saying out loud though.
