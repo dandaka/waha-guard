@@ -205,7 +205,8 @@ curl -X POST localhost:3010/api/sendText \
   -d '{"session":"default","chatId":"351900000000@c.us","text":"..."}'
 ```
 
-What it may override: `handshake_exhausted`, `reengagement_budget`, `reply_ratio`, `new_contact_budget`,
+What it may override: `handshake_exhausted`, `reengagement_budget`, `reengagement_share`,
+`reengagement_hour`, `recovery_replies_only`, `reply_ratio`, `new_contact_budget`,
 `warmup_budget`, `warmup_new_contacts`, `rate_minute` / `_hour` / `_day`. These are numbers we
 guessed and wrote down.
 
@@ -280,6 +281,9 @@ so a client can branch on the reason without parsing prose.
 | `guard.no_human_touch` | 403 | No human has ever messaged this contact from this number. |
 | `guard.handshake_exhausted` | 403 | Today's unanswered-message limit for this contact is spent. Resets at midnight. |
 | `guard.reengagement_budget` | 403 | This session's daily budget for re-contacting dormant people is spent. Nothing is queued. |
+| `guard.reengagement_share` | 403 | Dormant contacts would exceed `contacts.maxReengagementShare` of today's traffic. Frees as replies go out, or at midnight. |
+| `guard.reengagement_hour` | 429 | `contacts.maxReengagementsPerHour` is spent; `Retry-After` is when the next slot frees. |
+| `guard.recovery_replies_only` | 429 | The session just came back from a long outage; only replies go out until the window ends. |
 | `guard.unknown_send_route` | 403 | Message-creating route the guard does not know. |
 | `guard.force_not_queueable` | 400 | `x-guard-force` sent to a `queue`-mode session. |
 | `guard.quiet_override_reason_required` | 400 | `x-guard-quiet-override` without `x-guard-quiet-override-reason`. |

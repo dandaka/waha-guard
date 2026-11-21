@@ -101,7 +101,8 @@ Like `maxNewStrangersPerDay`, it counts only conversations this number **started
 below.
 
 To restart a warmup after re-linking a number, delete the session's row or set
-`warmup_started_at` — there is no API for it yet.
+`warmup_started_at` — there is no API for it yet. For a line coming back from an outage,
+[`recovery`](#recovery) applies a temporary overlay automatically.
 
 ## `contacts`
 
@@ -114,6 +115,9 @@ The relationship gates. These are the ones that matter.
 | `handshakeMaxMessages` | 1 | 2 | **judgement.** How many messages **per day** may go to someone who has never replied. One is the honest number. |
 | `dormantAfterDays` | 7 | 7 | **starting value, 2026-09-24.** Inbound silence that makes a previously engaged contact dormant. |
 | `maxReengagementsPerDay` | 5 | 5 | **starting value, 2026-09-24.** Distinct dormant contacts re-contacted per session per calendar day. |
+| `maxReengagementsPerHour` | `null` (no limit) | `null` | **judgement, 2026-11-21.** Distinct dormant contacts re-contacted per session per rolling 60 minutes. |
+| `maxReengagementShare` | `1` (disabled) | `1` | **judgement, 2026-11-21.** Ceiling on dormant contacts as a share of the distinct contacts messaged today, in (0, 1]. |
+| `reengagementShareFloor` | 5 | 5 | **judgement, 2026-11-21.** Dormant contacts the share cap always allows per day, however quiet the day. |
 
 The 2026-09-20/21 qualification wave re-contacted workers who had been silent for months;
 `pedro` was banned. An old reply cannot make a worker indefinitely safe to message. A
@@ -122,6 +126,36 @@ on the first send today. A second unanswered message today is refused by `handsh
 The cap returns `403 guard.reengagement_budget`, so excess messages cannot trickle out
 on following days. A recent inbound restores ordinary reply handling. Groups are exempt
 when `groups.mode: exempt`; the budget and status counters are per session.
+
+**Burst and mix (2026-11-21).** The line `assistente` was restricted on 2026-10-31 and again
+on 2026-11-20. On ordinary days 70–90% of its sends answered someone who wrote in the last
+24 h, and 10–74 sends a day to people silent for longer went through without trouble. On both
+block days the mix flipped — 80–90% of sends went to people silent over a day — and it came as
+a burst, 56 sends in 41 minutes. The daily cap saw none of that: it only counted contacts past
+`dormantAfterDays` (7), and only per calendar day. Two knobs answer it, both off by default so
+an unchanged policy behaves exactly as before; set `dormantAfterDays: 1` alongside them to
+cover the 1–7 day bucket.
+
+- `maxReengagementsPerHour` counts distinct dormant contacts messaged in the last 60 minutes
+  (rolling, exclusive of the cutoff like `rates`). When spent, the send gets
+  **`wait` `guard.reengagement_hour`** until the slot frees — the moment the oldest counted
+  contact's latest dormant send leaves the window — so `block` rides it out and `queue` sends
+  it then; otherwise `429` with an exact `Retry-After`.
+- `maxReengagementShare` and `reengagementShareFloor` bound the *mix* over the same zoned day
+  as the daily cap. With D dormant contacts and N distinct contacts (groups excluded under
+  `groups.mode: exempt`) messaged today, a new dormant contact is allowed when
+  `D + 1 <= max(reengagementShareFloor, maxReengagementShare * (N + 1))`. Otherwise
+  **`403 guard.reengagement_share`** — it frees as replies to recent contacts go out, or at
+  midnight in `quietHours.timezone`. A deny for the same reason the daily cap is one: the
+  allowance moves only with real conversation, and parking a message on that is a queue
+  waiting on a clock.
+
+Both charge a contact only on its first send today, like the daily cap, and both are
+`forceable`. In the gate order they sit right after `reengagementBudget`, the share (deny)
+before the hourly (wait). `evaluate` returns the first deny even past an earlier wait, so the
+order only decides which deny is reported first. `GET /_guard/status` reports
+`reengagement.spentLastHour`, `maxReengagementsPerHour`, `contactsMessagedToday`,
+`maxReengagementShare` and `reengagementShareFloor` next to the daily numbers.
 
 `requireHumanTouch` is the single most useful control here and the one most likely to be
 turned off for the wrong reason. It encodes the pattern that actually works: a human makes
@@ -295,6 +329,48 @@ it is a 503 again — waiting out a real outage on every request is worse than a
 `FAILED` and `SCAN_QR_CODE` are never treated as transient and never auto-restarted. They are
 the shape of an account action, and quietly retrying one is how an unlink becomes something
 nobody is told about. Those stop, loudly, and wait for a human.
+
+## `recovery`
+
+A temporary, stricter policy for a session that has just come back from a long outage. Off by
+default.
+
+| Key | Default | Provenance |
+|---|---|---|
+| `enabled` | `false` | — |
+| `afterOfflineMs` | 21600000 (6 h) | **judgement** — far past any flap or restart, well short of the 2.6-day outage of 2026-11-20 |
+| `durationMs` | 259200000 (3 days) | **guess** |
+| `repliesOnlyForMs` | 3600000 (1 h) | **judgement** — the 2026-11-20 burst started seconds after the re-link |
+| `replyWindowMs` | 86400000 (24 h) | **convention** — a "reply" is a send to someone whose last inbound is this recent |
+| `overlay` | `rates: { perHour: 20, perDay: 120, minSpacingMs: 60000 }`, `contacts: { maxReengagementsPerDay: 5, maxNewStrangersPerDay: 2 }` | **guess** |
+
+The warmup clock counts days since the guard first saw a session, so a number re-linked after
+days offline used to get its full limits at once. On 2026-11-20 the `assistente` line came back
+from a 2.6-day outage, the backlog of re-engagements went out within seconds, and it was
+restricted. A returning line is not an established one.
+
+How it works:
+
+- When a stopped session resumes (a `WORKING` status from the webhook or the poller, or
+  `POST /_guard/resume`), a stop that lasted at least `afterOfflineMs` is recorded in
+  `session_state` as `last_outage_ms` and `resumed_at`. Shorter stops — flaps — are not
+  recorded, so a reconnect inside a recovery window does not end it. It is SQLite state and
+  survives a guard restart. The guard logs one `recovery overlay active` line (session,
+  outage length, `until`) when it starts.
+- For `durationMs` after the resume, `overlay` — a partial policy — is deep-merged over the
+  session's policy for every gate and for lookups (arrays replace wholesale, like `sessions`).
+  It may not contain a `recovery` block, and the merged result is validated at load time.
+- For the first `repliesOnlyForMs`, only replies go out: a send to a contact whose last inbound
+  is older than `replyWindowMs` (or who has never written), and any group send, gets
+  **`wait` `guard.recovery_replies_only`** until `resumed_at + repliesOnlyForMs`. `forceable`.
+
+`recovery` can be set per session under `sessions.<name>`. `GET /_guard/policy?session=<name>`
+returns the policy in force at that moment — overlay included — plus `recoveryState`
+(`active`, `repliesOnly`, `resumedAt`, `outageMs`, `until`, `repliesOnlyUntil`);
+`GET /_guard/status` reports the same object as `sessions[].recovery`.
+
+An outage the guard did not see — the guard itself down while the session was — is not
+recorded: `stopped_since` is only set by an observed stop.
 
 ## `routes`
 

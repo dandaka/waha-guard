@@ -65,6 +65,15 @@ contacts:
   maxNewStrangersPerDay: 5
   # How many messages may go to someone who has never replied.
   handshakeMaxMessages: 1
+  # Inbound silence after which a previously engaged contact is "dormant".
+  dormantAfterDays: 7
+  # Dormant contacts re-contacted per calendar day, and per rolling hour (null = no limit).
+  maxReengagementsPerDay: 5
+  maxReengagementsPerHour: null
+  # Dormant contacts as a share of the distinct contacts messaged today, (0, 1]; 1 = off.
+  # Allowed when D + 1 <= max(reengagementShareFloor, maxReengagementShare * (N + 1)).
+  maxReengagementShare: 1
+  reengagementShareFloor: 5
 
 groups:
   # Group (@g.us) and channel (@newsletter) chats have no individual on the other end, so
@@ -125,6 +134,17 @@ ack:
   maxUndeliveredRatio: 0.3
   slowMultiplier: 2
   graceMinutes: 10
+
+# A stricter policy for a while after a long outage. Off by default; see docs/policy.md.
+recovery:
+  enabled: false
+  afterOfflineMs: 21600000 # a stop at least this long starts recovery on resume (6h)
+  durationMs: 259200000 # how long the overlay applies after the resume (3 days)
+  repliesOnlyForMs: 3600000 # first hour after resume: only replies, no group posts
+  replyWindowMs: 86400000 # a "reply" = the contact's last inbound is within this window
+  overlay: # deep-merged over the session policy while recovery is active
+    rates: { perHour: 20, perDay: 120, minSpacingMs: 60000 }
+    contacts: { maxReengagementsPerDay: 5, maxNewStrangersPerDay: 2 }
 
 routes:
   # A path that looks like a send but is not in the guard's route table is refused, so a

@@ -95,7 +95,46 @@ export interface ContactPolicy {
   dormantAfterDays: number
   /** Distinct dormant contacts first messaged per calendar day, per session. */
   maxReengagementsPerDay: number
+  /**
+   * Distinct dormant contacts first messaged per rolling 60 minutes, per session. Infinity
+   * (the default) disables it. The daily cap does not stop a burst: on both block days the
+   * whole day's re-engagement went out inside the first hour after the line came back.
+   */
+  maxReengagementsPerHour: number
+  /**
+   * Ceiling on dormant contacts as a share of the distinct contacts messaged today, in
+   * (0, 1]. 1 (the default) disables it. A new dormant contact is allowed when
+   * `D + 1 <= max(reengagementShareFloor, maxReengagementShare * (N + 1))`.
+   */
+  maxReengagementShare: number
+  /** Dormant contacts always allowed per day by the share cap, however quiet the day is. */
+  reengagementShareFloor: number
 }
+
+/**
+ * Recovery after an outage: a temporary, stricter policy for a session that has just come
+ * back from a long stop.
+ *
+ * The warmup clock counts days since the session was first seen, so a number re-linked after
+ * days offline used to get full limits the second it was back — and on 2026-11-20 the
+ * backlog of re-engagements went out seconds after the re-link, and the line was restricted.
+ * A returning line is not an established one; this treats it like a young one for a while.
+ */
+export interface RecoveryPolicy {
+  enabled: boolean
+  /** A stop at least this long, ended by a resume, starts recovery. Flaps are shorter. */
+  afterOfflineMs: number
+  /** How long after the resume the overlay applies. */
+  durationMs: number
+  /** For this long after the resume, only replies (and nothing to groups) go out. */
+  repliesOnlyForMs: number
+  /** A "reply" is a send to a contact whose last inbound is within this window. */
+  replyWindowMs: number
+  /** A partial policy deep-merged over the session's policy while recovery is active. */
+  overlay: RecoveryOverlay
+}
+
+export type RecoveryOverlay = DeepPartial<Omit<SessionPolicy, 'recovery'>>
 
 export interface GroupPolicy {
   /**
@@ -262,6 +301,7 @@ export interface SessionPolicy {
   sessionHealth: SessionHealthPolicy
   routes: RoutePolicy
   lookups: LookupPolicy
+  recovery: RecoveryPolicy
 }
 
 export interface Policy extends SessionPolicy {
@@ -313,6 +353,9 @@ const conservative: SessionPolicy = {
     handshakeMaxMessages: 1,
     dormantAfterDays: 7,
     maxReengagementsPerDay: 5,
+    maxReengagementsPerHour: Number.POSITIVE_INFINITY,
+    maxReengagementShare: 1,
+    reengagementShareFloor: 5,
   },
   groups: { mode: 'exempt' },
   replyRatio: {
@@ -372,6 +415,17 @@ const conservative: SessionPolicy = {
     maxPerHour: 60,
     maxPerDay: 300,
   },
+  recovery: {
+    enabled: false,
+    afterOfflineMs: 6 * 60 * 60 * 1000,
+    durationMs: 3 * 24 * 60 * 60 * 1000,
+    repliesOnlyForMs: 60 * 60 * 1000,
+    replyWindowMs: 24 * 60 * 60 * 1000,
+    overlay: {
+      rates: { perHour: 20, perDay: 120, minSpacingMs: 60_000 },
+      contacts: { maxReengagementsPerDay: 5, maxNewStrangersPerDay: 2 },
+    },
+  },
 }
 
 const balanced: SessionPolicy = structuredClone(conservative)
@@ -395,6 +449,9 @@ balanced.contacts = {
   handshakeMaxMessages: 2,
   dormantAfterDays: 7,
   maxReengagementsPerDay: 5,
+  maxReengagementsPerHour: Number.POSITIVE_INFINITY,
+  maxReengagementShare: 1,
+  reengagementShareFloor: 5,
 }
 balanced.replyRatio.maxOutPerIn = 6
 balanced.lookups = { ...balanced.lookups, maxPerHour: 120, maxPerDay: 600 }
@@ -421,6 +478,9 @@ off.contacts = {
   handshakeMaxMessages: Number.POSITIVE_INFINITY,
   dormantAfterDays: 7,
   maxReengagementsPerDay: Number.POSITIVE_INFINITY,
+  maxReengagementsPerHour: Number.POSITIVE_INFINITY,
+  maxReengagementShare: 1,
+  reengagementShareFloor: 5,
 }
 off.replyRatio.enabled = false
 off.optOut.enabled = false

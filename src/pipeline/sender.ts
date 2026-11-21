@@ -1,6 +1,7 @@
 import type { Logger } from '../observability/log.ts'
 import type { Metrics } from '../observability/metrics.ts'
 import { forSession } from '../policy/load.ts'
+import { applyRecovery } from '../policy/recovery.ts'
 import type { Policy, SessionPolicy } from '../policy/schema.ts'
 import { type Upstream, UpstreamError } from '../proxy/upstream.ts'
 import type { Store } from '../state/store.ts'
@@ -74,8 +75,16 @@ export class Sender {
     return this.mutex.waiting(session)
   }
 
+  /**
+   * The policy a send to this session is gated by: the per-session policy, with the
+   * recovery overlay on top while the session is recovering from an outage.
+   */
   policyFor(session: string): SessionPolicy {
-    return forSession(this.deps.policy(), session)
+    return applyRecovery(
+      forSession(this.deps.policy(), session),
+      this.deps.store.getSession(session),
+      this.deps.clock.now(),
+    )
   }
 
   /**

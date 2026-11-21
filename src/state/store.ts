@@ -85,6 +85,14 @@ export interface SessionStateRow {
    * budget forever.
    */
   stopped_since: number | null
+  /**
+   * Length of the last stop that met the recovery threshold, recorded when it ended. Kept
+   * across later short flaps, which are filtered out before they reach this column, so a
+   * two-second reconnect inside a recovery window does not end the recovery.
+   */
+  last_outage_ms: number | null
+  /** When that stop ended. Together with `last_outage_ms` it drives `policy/recovery.ts`. */
+  resumed_at: number | null
 }
 
 const MIGRATIONS: string[] = [
@@ -182,6 +190,9 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX lookups_session_time ON lookups (session, at);
    CREATE INDEX lookups_number_time ON lookups (session, phone, at);`,
+  // The last long outage and when it ended, for recovery after an outage.
+  `ALTER TABLE session_state ADD COLUMN last_outage_ms INTEGER;
+   ALTER TABLE session_state ADD COLUMN resumed_at INTEGER;`,
 ]
 
 export interface NumberCheckRow {
@@ -724,9 +735,22 @@ export class Store {
     )
   }
 
+  /**
+   * A send is "dormant" when the contact's latest inbound (or human touch) at send time was
+   * at least `dormantMs` old. Reading the inbound history rather than today's contact row
+   * keeps a spent slot spent even if the recipient answers later. Bound as ?3.
+   */
+  private static dormantSend(alias: string): string {
+    return `(SELECT MAX(t.at) FROM (
+          SELECT i.at FROM inbound i WHERE i.session = ${alias}.session AND i.chat_id = ${alias}.chat_id AND i.at <= ${alias}.sent_at
+          UNION ALL
+          SELECT c.human_touch_at AS at FROM contacts c
+            WHERE c.session = ${alias}.session AND c.chat_id = ${alias}.chat_id AND c.human_touch_at <= ${alias}.sent_at
+        ) t) <= ${alias}.sent_at - ?3`
+  }
+
   /** Distinct contacts sent to after their last inbound had gone stale at send time.
-   * Reading the inbound history rather than today's contact row keeps a spent slot spent
-   * even if the recipient answers later. Failed sends are removed from `sends` and do not count.
+   * Failed sends are removed from `sends` and do not count.
    */
   countDormantContactsMessagedSince(
     session: string,
@@ -737,16 +761,50 @@ export class Store {
     const row = this.db
       .query(`
       SELECT COUNT(DISTINCT s.chat_id) AS n FROM sends s
-      WHERE s.session = ? AND s.sent_at >= ?
+      WHERE s.session = ?1 AND s.sent_at >= ?2
         ${excludeGroups ? Store.notAGroup('s.chat_id') : ''}
-        AND (SELECT MAX(t.at) FROM (
-          SELECT i.at FROM inbound i WHERE i.session = s.session AND i.chat_id = s.chat_id AND i.at <= s.sent_at
-          UNION ALL
-          SELECT c.human_touch_at AS at FROM contacts c
-            WHERE c.session = s.session AND c.chat_id = s.chat_id AND c.human_touch_at <= s.sent_at
-        ) t) <= s.sent_at - ?
+        AND ${Store.dormantSend('s')}
     `)
       .get(session, since, dormantMs) as { n: number }
+    return row.n
+  }
+
+  /**
+   * When the count of `countDormantContactsMessagedSince(since)` next drops below `limit`
+   * in a rolling `windowMs`. A contact leaves the window when its *latest* dormant send in
+   * it ages out, so contacts are ranked by that, mirroring `slotFreesAt`.
+   */
+  dormantSlotFreesAt(
+    session: string,
+    since: number,
+    limit: number,
+    windowMs: number,
+    dormantMs: number,
+    excludeGroups = true,
+  ): number | null {
+    if (!Number.isFinite(limit)) return null
+    const row = this.db
+      .query(`
+      SELECT MAX(s.sent_at) AS last_at FROM sends s
+      WHERE s.session = ?1 AND s.sent_at >= ?2
+        ${excludeGroups ? Store.notAGroup('s.chat_id') : ''}
+        AND ${Store.dormantSend('s')}
+      GROUP BY s.chat_id
+      ORDER BY last_at DESC
+      LIMIT 1 OFFSET ?4
+    `)
+      .get(session, since, dormantMs, Math.max(0, limit - 1)) as { last_at: number } | null
+    return row ? row.last_at + windowMs : null
+  }
+
+  /** Distinct chats sent to since `since` — the denominator of the re-engagement share. */
+  countContactsMessagedSince(session: string, since: number, excludeGroups = false): number {
+    const row = this.db
+      .query(
+        `SELECT COUNT(DISTINCT chat_id) AS n FROM sends
+         WHERE session = ? AND sent_at >= ? ${excludeGroups ? Store.notAGroup('chat_id') : ''}`,
+      )
+      .get(session, since) as { n: number }
     return row.n
   }
 
@@ -883,18 +941,34 @@ export class Store {
    * `stopped_since` is only set on the transition into a stop — `COALESCE` keeps the
    * original timestamp when a stop is re-announced, which is what lets the grace window
    * measure how long the session has actually been down.
+   *
+   * On a resume, returns how long the session was stopped (null if it was not), and — when
+   * that is at least `recordOutageAtLeastMs` — records it as the last outage for recovery.
+   * Shorter stops are not recorded, so a flap cannot overwrite the outage that started an
+   * ongoing recovery window.
    */
-  setStopped(session: string, reason: string | null, now: number, status?: string | null): void {
-    this.ensureSession(session, now)
+  setStopped(
+    session: string,
+    reason: string | null,
+    now: number,
+    status?: string | null,
+    recordOutageAtLeastMs = 0,
+  ): number | null {
+    const before = this.ensureSession(session, now)
     if (reason === null) {
+      const outageMs =
+        before.stopped_since === null ? null : Math.max(0, now - before.stopped_since)
+      const record = outageMs !== null && outageMs >= recordOutageAtLeastMs
       this.db
         .query(
           `UPDATE session_state
-           SET stopped_reason = NULL, stopped_status = NULL, stopped_since = NULL
-           WHERE session = ?`,
+           SET stopped_reason = NULL, stopped_status = NULL, stopped_since = NULL,
+               last_outage_ms = CASE WHEN ?2 THEN ?3 ELSE last_outage_ms END,
+               resumed_at = CASE WHEN ?2 THEN ?4 ELSE resumed_at END
+           WHERE session = ?1`,
         )
-        .run(session)
-      return
+        .run(session, record ? 1 : 0, outageMs, now)
+      return outageMs
     }
     this.db
       .query(
@@ -905,6 +979,7 @@ export class Store {
          WHERE session = ?`,
       )
       .run(reason, status ?? null, now, session)
+    return null
   }
 
   setWarmupStart(session: string, at: number): void {

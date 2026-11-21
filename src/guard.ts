@@ -4,6 +4,7 @@ import { Metrics } from './observability/metrics.ts'
 import { countsNewStrangers, warmupStep } from './pipeline/gates.ts'
 import { Sender } from './pipeline/sender.ts'
 import { forSession } from './policy/load.ts'
+import { applyRecovery, recoveryState } from './policy/recovery.ts'
 import type { Policy, SessionPolicy } from './policy/schema.ts'
 import { classifyPath, isUnknownSend, KNOWN_SEND_ROUTES } from './proxy/routes.ts'
 import { Upstream, UpstreamError } from './proxy/upstream.ts'
@@ -13,7 +14,7 @@ import { type Clock, systemClock } from './util/clock.ts'
 import type { Rng } from './util/random.ts'
 import { DAY, HOUR, startOfZonedDay } from './util/time.ts'
 import { chatIdFromSendBody, sessionFromSendBody, textFromSendBody } from './waha/message.ts'
-import { SessionMonitor } from './waha/session-health.ts'
+import { resumeSession, SessionMonitor } from './waha/session-health.ts'
 import { Downstream } from './webhook/downstream.ts'
 import { Observer, parseEvents } from './webhook/observer.ts'
 
@@ -373,7 +374,12 @@ export class Guard {
     match: ReturnType<typeof classifyPath>,
   ): Promise<Response> {
     const session = match.sessionFromPath ?? url.searchParams.get('session') ?? 'default'
-    const policy = forSession(this.policy, session)
+    // A recovery overlay may tighten the lookup budget too.
+    const policy = applyRecovery(
+      forSession(this.policy, session),
+      this.store.getSession(session),
+      this.clock.now(),
+    )
     const phone = lookupPhone(url.searchParams.get('phone'))
     if (!policy.lookups.enabled || !phone) {
       this.metrics.inc('proxy_passthrough_total')
@@ -541,7 +547,11 @@ export class Guard {
         webhookTargets: this.options.config.webhookTargets,
         queueDepth: this.store.queuedDepth(),
         sessions: this.store.listSessions().map((s) => {
-          const policy = forSession(this.policy, s.session)
+          const base = forSession(this.policy, s.session)
+          const policy = applyRecovery(base, s, now)
+          const dayStart = startOfZonedDay(now, policy.quietHours.timezone)
+          const dormantMs = policy.contacts.dormantAfterDays * DAY
+          const excludeGroups = policy.groups.mode === 'exempt'
           const step = warmupStep(policy, s, now)
           const budget = countsNewStrangers(policy, this.store, s.session, now)
           return {
@@ -576,19 +586,35 @@ export class Guard {
             reengagement: {
               spentToday: this.store.countDormantContactsMessagedSince(
                 s.session,
-                startOfZonedDay(now, policy.quietHours.timezone),
-                policy.contacts.dormantAfterDays * DAY,
-                policy.groups.mode === 'exempt',
+                dayStart,
+                dormantMs,
+                excludeGroups,
               ),
               maxReengagementsPerDay: policy.contacts.maxReengagementsPerDay,
+              spentLastHour: this.store.countDormantContactsMessagedSince(
+                s.session,
+                now - HOUR + 1,
+                dormantMs,
+                excludeGroups,
+              ),
+              maxReengagementsPerHour: policy.contacts.maxReengagementsPerHour,
+              // The share cap's denominator: distinct contacts messaged today.
+              contactsMessagedToday: this.store.countContactsMessagedSince(
+                s.session,
+                dayStart,
+                excludeGroups,
+              ),
+              maxReengagementShare: policy.contacts.maxReengagementShare,
+              reengagementShareFloor: policy.contacts.reengagementShareFloor,
               dormantAfterDays: policy.contacts.dormantAfterDays,
               dormantContactsMessagedLast7Days: this.store.countDormantContactsMessagedSince(
                 s.session,
                 now - 7 * DAY,
-                policy.contacts.dormantAfterDays * DAY,
-                policy.groups.mode === 'exempt',
+                dormantMs,
+                excludeGroups,
               ),
             },
+            recovery: recoveryState(base, s, now),
             lookups: {
               lastHour: this.store.lookupWindow(s.session, now - HOUR).count,
               lastDay: this.store.lookupWindow(s.session, now - DAY).count,
@@ -604,7 +630,16 @@ export class Guard {
 
     if (path === '/_guard/policy') {
       const session = url.searchParams.get('session')
-      return Response.json(session ? forSession(this.policy, session) : this.policy)
+      if (!session) return Response.json(this.policy)
+      // The policy in force for that session right now — with the recovery overlay merged
+      // in while it applies — and the recovery window itself, so an operator can see why.
+      const now = this.clock.now()
+      const row = this.store.getSession(session)
+      const base = forSession(this.policy, session)
+      return Response.json({
+        ...applyRecovery(base, row, now),
+        recoveryState: recoveryState(base, row, now),
+      })
     }
 
     if (path === '/_guard/contact') {
@@ -773,7 +808,11 @@ export class Guard {
     if (req.method === 'POST' && path === '/_guard/resume') {
       const body = (await req.json().catch(() => null)) as { session?: string } | null
       const session = body?.session ?? 'default'
-      this.store.setStopped(session, null, this.clock.now())
+      resumeSession(
+        { store: this.store, policy: () => this.policy, log: this.log, metrics: this.metrics },
+        session,
+        this.clock.now(),
+      )
       this.log.info('session manually resumed', { session })
       return Response.json({ guard: true, session, stopped: null })
     }

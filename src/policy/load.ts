@@ -45,7 +45,7 @@ const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
 
 function validate(p: Policy): void {
   const problems: string[] = []
-  const check = (scope: string, s: SessionPolicy) => {
+  const check = (scope: string, s: SessionPolicy, overlayScope = false) => {
     if (s.quietHours.enabled) {
       for (const [field, value] of [
         ['start', s.quietHours.start],
@@ -70,6 +70,29 @@ function validate(p: Policy): void {
       problems.push(`${scope}.contacts.dormantAfterDays must be a positive number`)
     if (s.contacts.maxReengagementsPerDay < 0)
       problems.push(`${scope}.contacts.maxReengagementsPerDay must be >= 0`)
+    if (!(s.contacts.maxReengagementsPerHour >= 0))
+      problems.push(`${scope}.contacts.maxReengagementsPerHour must be >= 0`)
+    if (!(s.contacts.maxReengagementShare > 0 && s.contacts.maxReengagementShare <= 1))
+      problems.push(`${scope}.contacts.maxReengagementShare must be in (0, 1]`)
+    if (!(s.contacts.reengagementShareFloor >= 0))
+      problems.push(`${scope}.contacts.reengagementShareFloor must be >= 0`)
+    for (const field of [
+      'afterOfflineMs',
+      'durationMs',
+      'repliesOnlyForMs',
+      'replyWindowMs',
+    ] as const) {
+      if (!(s.recovery[field] >= 0)) problems.push(`${scope}.recovery.${field} must be >= 0`)
+    }
+    if (!isPlainObject(s.recovery.overlay)) {
+      problems.push(`${scope}.recovery.overlay must be a mapping`)
+    } else if ('recovery' in s.recovery.overlay) {
+      problems.push(`${scope}.recovery.overlay must not contain a recovery block`)
+    } else if (s.recovery.enabled && !overlayScope) {
+      // The overlay is validated as the policy it produces, so a typo cannot lie dormant
+      // until the first outage.
+      check(`${scope}.recovery.overlay`, deepMerge(s, s.recovery.overlay), true)
+    }
     if (s.backpressure.maxWaitMs <= 0) problems.push(`${scope}.backpressure.maxWaitMs must be > 0`)
     if (s.typing.enabled) {
       if (s.typing.wpmMin <= 0) problems.push(`${scope}.typing.wpmMin must be > 0`)
@@ -107,7 +130,7 @@ function validate(p: Policy): void {
         if (!(s.lookups[field] >= 0)) problems.push(`${scope}.lookups.${field} must be >= 0`)
       }
     }
-    if (s.presence === 'guard' && !s.typing.enabled) {
+    if (!overlayScope && s.presence === 'guard' && !s.typing.enabled) {
       // Not an error: owning presence without a typing plan just means the guard suppresses
       // nothing and sends nothing. Worth saying out loud though.
       console.warn(
