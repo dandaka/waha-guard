@@ -1,3 +1,4 @@
+import { recoveryState } from '../policy/recovery.ts'
 import type { ContactState, SessionPolicy } from '../policy/schema.ts'
 import type { ContactRow, SessionStateRow, Store } from '../state/store.ts'
 import {
@@ -278,6 +279,114 @@ function reengagementBudget(inputs: GateInputs): GateResult {
   }
 }
 
+/** Has this contact already had a send today? Then it already spent its re-engagement slot. */
+function sentToContactToday({ policy, store, ctx }: GateInputs): boolean {
+  const since = startOfZonedDay(ctx.now, policy.quietHours.timezone)
+  return store.countSendsToContactSince(ctx.session, ctx.chatId, since) > 0
+}
+
+/**
+ * The daily cap does not stop a burst. On 2026-10-31 and 2026-11-20 the line was restricted
+ * after dozens of dormant contacts went out inside an hour, so this rations them per rolling
+ * 60 minutes too. A `wait`, unlike the daily cap: the slot frees within the hour, so the
+ * caller gets an exact Retry-After rather than a refusal.
+ */
+function reengagementHourly(inputs: GateInputs): GateResult {
+  const { policy, store, ctx } = inputs
+  const limit = policy.contacts.maxReengagementsPerHour
+  if (!Number.isFinite(limit)) return allow
+  if (!isDormant(inputs)) return allow
+  if (sentToContactToday(inputs)) return allow
+  // Rolling windows are exclusive of their cutoff, like `slidingWindows`; the store's
+  // dormant counter is inclusive, so move the cutoff by one millisecond.
+  const since = ctx.now - HOUR + 1
+  const dormantMs = policy.contacts.dormantAfterDays * DAY
+  const excludeGroups = policy.groups.mode === 'exempt'
+  const spent = store.countDormantContactsMessagedSince(
+    ctx.session,
+    since,
+    dormantMs,
+    excludeGroups,
+  )
+  if (spent < limit) return allow
+  const until = store.dormantSlotFreesAt(ctx.session, since, limit, HOUR, dormantMs, excludeGroups)
+  return {
+    kind: 'wait',
+    until: until ?? ctx.now + HOUR,
+    code: 'guard.reengagement_hour',
+    reason: `contacts.maxReengagementsPerHour of ${limit}/hour is spent for ${ctx.session}`,
+  }
+}
+
+/**
+ * What a restricted day looked like was not a number but a *mix*: on ordinary days 70–90% of
+ * sends answer someone who wrote in the last day; on both block days 80–90% went to people
+ * who had been silent. So dormant contacts are held to a share of the distinct contacts
+ * messaged today, with a floor so a quiet morning can still re-engage a few people.
+ *
+ * A `deny`, like the daily cap: the allowance grows only as conversational traffic does, and
+ * parking a message until it might is a queue waiting on a clock.
+ */
+function reengagementShare(inputs: GateInputs): GateResult {
+  const { policy, store, ctx } = inputs
+  const share = policy.contacts.maxReengagementShare
+  if (!(share < 1)) return allow
+  if (!isDormant(inputs)) return allow
+  if (sentToContactToday(inputs)) return allow
+  const since = startOfZonedDay(ctx.now, policy.quietHours.timezone)
+  const excludeGroups = policy.groups.mode === 'exempt'
+  const dormant = store.countDormantContactsMessagedSince(
+    ctx.session,
+    since,
+    policy.contacts.dormantAfterDays * DAY,
+    excludeGroups,
+  )
+  const contacts = store.countContactsMessagedSince(ctx.session, since, excludeGroups)
+  const floor = policy.contacts.reengagementShareFloor
+  const allowance = Math.max(floor, share * (contacts + 1))
+  if (dormant + 1 <= allowance) return allow
+  return {
+    kind: 'deny',
+    status: 403,
+    code: 'guard.reengagement_share',
+    reason:
+      `contacts.maxReengagementShare: ${dormant} of the ${contacts} contacts messaged today ` +
+      `were dormant; another would exceed ${Math.round(share * 100)}% of the day ` +
+      `(floor ${floor}). Frees as replies to recent contacts go out, or at ` +
+      `${policy.quietHours.timezone} midnight`,
+  }
+}
+
+/**
+ * The first hour after a line comes back from a long outage: only replies go out.
+ *
+ * On 2026-11-20 the re-engagement backlog started seconds after the device was re-linked
+ * following a 2.6-day outage, and the line was restricted. Someone who wrote in during the
+ * last `replyWindowMs` is expecting an answer; everyone else, and every group, can wait an
+ * hour. A `wait` to the end of the window, so `queue` mode simply sends it then.
+ */
+function recoveryRepliesOnly({ policy, session, contact, ctx }: GateInputs): GateResult {
+  const state = recoveryState(policy, session, ctx.now)
+  if (!state.repliesOnly) return allow
+  const group = isGroupChatId(ctx.chatId)
+  if (
+    !group &&
+    contact.last_in_at !== null &&
+    contact.last_in_at > ctx.now - policy.recovery.replyWindowMs
+  )
+    return allow
+  return {
+    kind: 'wait',
+    until: state.repliesOnlyUntil!,
+    code: 'guard.recovery_replies_only',
+    reason:
+      `session came back from a ${Math.round((state.outageMs ?? 0) / HOUR)}h outage; ` +
+      `only replies to contacts who wrote in the last ` +
+      `${Math.round(policy.recovery.replyWindowMs / HOUR)}h go out until ` +
+      `${new Date(state.repliesOnlyUntil!).toISOString()}${group ? ' (no group posts)' : ''}`,
+  }
+}
+
 /**
  * How many unanswered messages may go to one contact — **per day**, not ever.
  *
@@ -548,8 +657,14 @@ const GATES: Gate[] = [
   { run: groupBlocked, forceable: false },
   { run: optOut, forceable: false },
   { run: humanTouch, forceable: false },
+  { run: recoveryRepliesOnly, forceable: true },
   { run: handshake, forceable: true },
   { run: reengagementBudget, forceable: true },
+  // The share cap is a deny and the hourly cap a wait. `evaluate` returns the first deny
+  // even past a wait, so the order between them only decides which deny is reported first;
+  // the deny sits first anyway, so the listing reads the way the rule reads.
+  { run: reengagementShare, forceable: true },
+  { run: reengagementHourly, forceable: true },
   { run: replyRatio, forceable: true },
   { run: timelock, forceable: false },
   { run: quietHours, forceable: false, quietOverridable: true },

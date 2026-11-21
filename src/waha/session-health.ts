@@ -15,6 +15,7 @@
 import type { Logger } from '../observability/log.ts'
 import type { Metrics } from '../observability/metrics.ts'
 import { forSession } from '../policy/load.ts'
+import { recoveryState } from '../policy/recovery.ts'
 import type { Policy } from '../policy/schema.ts'
 import { type Upstream, UpstreamError } from '../proxy/upstream.ts'
 import type { Store } from '../state/store.ts'
@@ -27,6 +28,8 @@ export type StatusSource = 'webhook' | 'poll'
 
 export interface SessionHealthDeps {
   store: Store
+  /** Read on resume, for the recovery threshold. */
+  policy: () => Policy
   metrics: Metrics
   log: Logger
   clock: Clock
@@ -60,9 +63,33 @@ export function applySessionStatus(
 
   if (status !== 'WORKING') return
   if (!before?.stopped_reason) return
-  deps.store.setStopped(session, null, now)
+  resumeSession(deps, session, now)
   deps.metrics.inc('session_recoveries_total', { session, source })
   deps.log.info('session recovered — outbound resumed', { session, source })
+}
+
+/**
+ * Clear a stop and, when it lasted past `recovery.afterOfflineMs`, record it as the outage
+ * that starts recovery. Says so once, at the moment the overlay becomes active — the one
+ * line an operator needs to explain why a line that just came back is sending slowly.
+ */
+export function resumeSession(
+  deps: Pick<SessionHealthDeps, 'store' | 'policy' | 'log' | 'metrics'>,
+  session: string,
+  now: number,
+): void {
+  const policy = forSession(deps.policy(), session)
+  const outageMs = deps.store.setStopped(session, null, now, null, policy.recovery.afterOfflineMs)
+  if (outageMs === null || outageMs < policy.recovery.afterOfflineMs) return
+  const state = recoveryState(policy, deps.store.getSession(session), now)
+  if (!state.active) return
+  deps.metrics.inc('recovery_started_total', { session })
+  deps.log.info('recovery overlay active', {
+    session,
+    outageMs,
+    until: state.until,
+    repliesOnlyUntil: state.repliesOnlyUntil,
+  })
 }
 
 export interface SessionMonitorDeps extends SessionHealthDeps {
