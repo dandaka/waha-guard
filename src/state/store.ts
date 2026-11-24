@@ -161,6 +161,20 @@ const MIGRATIONS: string[] = [
   // Why a stop happened and when it started, so a flap can be told from an outage.
   `ALTER TABLE session_state ADD COLUMN stopped_status TEXT;
    ALTER TABLE session_state ADD COLUMN stopped_since INTEGER;`,
+  // Dedupe inbound per session, not globally.
+  //
+  // The index exists to swallow a *redelivered* webhook, and a redelivery is always for
+  // the same session — so session belongs in the key. Keying on msg_id alone was harmless
+  // while one guard fronted one session, and became wrong the moment several sessions
+  // shared a state file: two accounts in the same WhatsApp group receive the same message
+  // id, legitimately, once each. Under the old index the second arrival was silently
+  // swallowed — recordInbound returns false and the observer stops there, so that
+  // session's contact never got its in_count, last_in_at, human_touch_at, or its
+  // promotion to `known`. Found by merging two real guard states: 110 such rows, every
+  // one of them a group both lines belong to.
+  `DROP INDEX IF EXISTS inbound_msg_id;
+   CREATE UNIQUE INDEX inbound_session_msg_id ON inbound (session, msg_id)
+     WHERE msg_id IS NOT NULL;`,
 ]
 
 const STATE_RANK: Record<ContactState, number> = {

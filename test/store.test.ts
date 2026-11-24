@@ -59,6 +59,19 @@ describe('contacts', () => {
     expect(store.getContact('s', 'a@c.us')!.in_count).toBe(1)
   })
 
+  test('the same message id on two sessions is counted for each', () => {
+    // Two of our numbers in one WhatsApp group receive the same message id, once each.
+    // Deduping on msg_id alone swallowed the second — that session's contact stayed a
+    // stranger with in_count 0, which is the gate that decides whether we may reply.
+    const store = new Store(':memory:')
+    expect(store.recordInbound('pedro', 'g@g.us', 'shared-id', T0)).toBe(true)
+    expect(store.recordInbound('assistente', 'g@g.us', 'shared-id', T0)).toBe(true)
+    expect(store.getContact('pedro', 'g@g.us')!.in_count).toBe(1)
+    expect(store.getContact('assistente', 'g@g.us')!.in_count).toBe(1)
+    // Within one session it is still swallowed.
+    expect(store.recordInbound('pedro', 'g@g.us', 'shared-id', T0 + 5)).toBe(false)
+  })
+
   test('a message typed on the phone marks the contact as touched by a human', () => {
     const store = new Store(':memory:')
     store.recordHumanOutbound('s', 'a@c.us', 'h1', T0)
